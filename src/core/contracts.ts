@@ -95,6 +95,15 @@ export type FlagKind =
   /** Left the interview entirely, or turned a question back on the panel. */
   | 'off_topic'
 
+/** Runtime list of the union above, for validating anything a model returns. */
+export const FLAG_KINDS: readonly FlagKind[] = [
+  'vague',
+  'contradiction',
+  'unchallenged_impact',
+  'evasion',
+  'off_topic',
+]
+
 export interface Flag {
   id: string
   kind: FlagKind
