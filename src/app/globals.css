@@ -121,6 +121,46 @@ button {
   background: var(--evidence);
 }
 
+/* The live caption under the controls: proof the microphone is hearing you,
+   and proof it has stopped listening while the panel talks. */
+.hearing {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 19px;
+  font-size: 13px;
+  font-style: italic;
+  color: var(--read-dim);
+}
+
+.hearing::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--air);
+  animation: hearing-pulse 1.4s ease-in-out infinite;
+}
+
+.hearing[data-muted='true'] {
+  color: var(--read-faint);
+}
+
+.hearing[data-muted='true']::before {
+  background: var(--idle);
+  animation: none;
+}
+
+@keyframes hearing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hearing::before { animation: none; }
+}
+
 /* ── The rack of interviewers ──────────────────────────────────────────── */
 
 .rack {

@@ -110,12 +110,40 @@ export class PanelVoice {
 // Input — the candidate's microphone
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface HeardUtterance {
+/**
+ * How long the candidate must be quiet before the turn is over.
+ *
+ * Chrome marks a result `isFinal` at every phrase boundary, which is far too
+ * eager — one answer arrives as three or four finals, and treating each as a
+ * turn puts the panel on the floor mid-sentence. Silence ends a turn here, not
+ * the phrase boundary. Tune this in rehearsal: too low and a thinking pause
+ * cuts the candidate off.
+ */
+export const SILENCE_MS = 1200
+
+/** How long to wait before retrying a restart the browser refused. */
+const RESTART_RETRY_MS = 250
+
+/**
+ * Recogniser errors that are routine rather than fatal. Chrome fires `no-speech`
+ * whenever the candidate simply pauses, and `aborted` on every restart; neither
+ * is worth a notice, and neither should take the microphone down.
+ */
+const BENIGN_ERRORS = new Set(['no-speech', 'aborted', 'audio-capture-timeout'])
+
+export interface HeardTurn {
   text: string
-  final: boolean
   /** ms since the recogniser started */
   tStart: number
   tEnd: number
+}
+
+export interface EarHandlers {
+  /** A finished turn, ready for the coordinator. */
+  onTurn: (turn: HeardTurn) => void
+  /** Live partial text, so the candidate can see they are being heard. */
+  onInterim?: (text: string) => void
+  onError?: (message: string) => void
 }
 
 type RecognitionCtor = new () => SpeechRecognitionLike
@@ -142,57 +170,213 @@ function recognitionCtor(): RecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
 }
 
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+
 /**
- * Candidate speech-to-text. Timestamps are taken the moment a phrase starts
- * being recognised — captured here, at the edge, before anything reads them.
+ * Candidate speech-to-text.
+ *
+ * Three things make this survive an actual interview rather than a single
+ * sentence: it reopens the recogniser when the browser closes it, it ends a
+ * turn on silence rather than on Chrome's phrase boundaries, and it can be
+ * deafened while the panel speaks so the interviewers are never transcribed as
+ * the candidate.
+ *
+ * Timestamps are taken here, at the edge, the moment a phrase starts being
+ * recognised — the coordinator reads `tEnd` as the instant silence fell.
  */
 export class CandidateEar {
   private recognition: SpeechRecognitionLike | null = null
+  private handlers: EarHandlers | null = null
   private origin = 0
-  private phraseStart: number | null = null
+
+  /** Whether we intend to listen — deliberately distinct from whether the browser is. */
+  private intent = false
+  private deaf = false
+
+  private silence: ReturnType<typeof setTimeout> | null = null
+  private retry: ReturnType<typeof setTimeout> | null = null
+
+  private finalText = ''
+  private interimText = ''
+  /** Highest result index already folded into `finalText`, per recogniser session. */
+  private lastFinalIndex = -1
+  private turnStart: number | null = null
+  private lastHeardAt = 0
 
   get supported(): boolean {
     return recognitionCtor() !== null
   }
 
-  start(onHeard: (u: HeardUtterance) => void, onError?: (message: string) => void): boolean {
+  get listening(): boolean {
+    return this.intent
+  }
+
+  get muted(): boolean {
+    return this.deaf
+  }
+
+  start(handlers: EarHandlers): boolean {
     const Ctor = recognitionCtor()
     if (!Ctor) {
-      onError?.('This browser has no speech recognition. Use Chrome, or type the answer instead.')
+      handlers.onError?.('This browser has no speech recognition. Use Chrome, or type the answer instead.')
       return false
     }
 
-    const recognition = new Ctor()
-    recognition.continuous = true
-    recognition.interimResults = true
-    recognition.lang = 'en-US'
-    this.origin = performance.now()
-
-    recognition.onresult = (event) => {
-      let text = ''
-      let final = false
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        text += event.results[i][0].transcript
-        if (event.results[i].isFinal) final = true
-      }
-      if (!text.trim()) return
-
-      const now = performance.now() - this.origin
-      this.phraseStart ??= now
-      onHeard({ text: text.trim(), final, tStart: this.phraseStart, tEnd: now })
-      if (final) this.phraseStart = null
-    }
-
-    recognition.onerror = () => onError?.('Microphone unavailable or permission denied.')
-
-    this.recognition = recognition
-    recognition.start()
+    this.handlers = handlers
+    this.intent = true
+    this.deaf = false
+    this.origin = now()
+    this.resetTurn()
+    this.open(Ctor)
     return true
   }
 
   stop(): void {
-    this.recognition?.stop()
+    // Intent is cleared first: `onend` fires synchronously inside `stop()` in
+    // some browsers, and it must not resurrect a recogniser we just closed.
+    this.intent = false
+    this.clearTimers()
+    this.resetTurn()
+    const recognition = this.recognition
     this.recognition = null
-    this.phraseStart = null
+    this.handlers = null
+    recognition?.stop()
+  }
+
+  /**
+   * Deafen the microphone while the panel speaks.
+   *
+   * The recogniser keeps running — tearing it down per utterance is slow and
+   * swallows the candidate's first word — but everything it hears is dropped,
+   * so the interviewers' own synthesised audio never comes back as an answer.
+   */
+  mute(): void {
+    this.deaf = true
+    this.clearSilence()
+    this.resetTurn()
+  }
+
+  unmute(): void {
+    this.deaf = false
+    this.resetTurn()
+  }
+
+  // ── The recogniser session ────────────────────────────────────────────────
+
+  private open(Ctor: RecognitionCtor): void {
+    const recognition = new Ctor()
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.lang = 'en-US'
+    recognition.onresult = (event) => this.consume(event)
+    recognition.onerror = (event) => this.onRecognitionError(event)
+    recognition.onend = () => this.reopen()
+
+    this.recognition = recognition
+    this.lastFinalIndex = -1
+
+    try {
+      recognition.start()
+    } catch {
+      // The previous session had not finished releasing the device. Try again.
+      this.retry = setTimeout(() => this.reopen(), RESTART_RETRY_MS)
+    }
+  }
+
+  /**
+   * Chrome ends recognition by itself after a few seconds of quiet, even with
+   * `continuous = true`. Without this the microphone dies silently after the
+   * candidate's first pause while the button still reads "Stop microphone".
+   */
+  private reopen(): void {
+    if (!this.intent) return
+    const Ctor = recognitionCtor()
+    if (!Ctor) return
+    // Anything still unfinalised dies with the session it belonged to. Keep it:
+    // mid-answer, that text is the front half of the candidate's sentence.
+    this.commitInterim()
+    this.open(Ctor)
+  }
+
+  /** Promote pending interim text to final. It will never be finalised now. */
+  private commitInterim(): void {
+    if (!this.interimText) return
+    this.finalText = this.finalText ? `${this.finalText} ${this.interimText}` : this.interimText
+    this.interimText = ''
+  }
+
+  private onRecognitionError(event: Event): void {
+    const code = (event as Event & { error?: string }).error
+    if (code && BENIGN_ERRORS.has(code)) return // `onend` will reopen the session
+    this.handlers?.onError?.('Microphone unavailable or permission denied.')
+    this.stop()
+  }
+
+  // ── Turn assembly ─────────────────────────────────────────────────────────
+
+  private consume(event: SpeechRecognitionResultEventLike): void {
+    if (this.deaf) return
+
+    let interim = ''
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i]
+      const text = result[0].transcript.trim()
+      if (!text) continue
+
+      if (result.isFinal) {
+        // A final result is folded in once. The recogniser can re-deliver the
+        // tail of a phrase as it revises it, and `lastFinalIndex` is what keeps
+        // the candidate from saying everything twice.
+        if (i > this.lastFinalIndex) {
+          this.finalText = this.finalText ? `${this.finalText} ${text}` : text
+          this.lastFinalIndex = i
+        }
+      } else {
+        interim = interim ? `${interim} ${text}` : text
+      }
+    }
+
+    if (!this.finalText && !interim) return
+
+    this.interimText = interim
+    const at = now() - this.origin
+    this.turnStart ??= at
+    this.lastHeardAt = at
+
+    if (interim) this.handlers?.onInterim?.(interim)
+    this.armSilence()
+  }
+
+  private armSilence(): void {
+    this.clearSilence()
+    this.silence = setTimeout(() => this.endTurn(), SILENCE_MS)
+  }
+
+  private endTurn(): void {
+    this.silence = null
+    const text = [this.finalText, this.interimText].filter(Boolean).join(' ').trim()
+    const tStart = this.turnStart ?? 0
+    const tEnd = this.lastHeardAt
+    this.resetTurn()
+    if (!text) return
+    this.handlers?.onTurn({ text, tStart, tEnd })
+  }
+
+  private resetTurn(): void {
+    this.finalText = ''
+    this.interimText = ''
+    this.turnStart = null
+    this.lastHeardAt = 0
+  }
+
+  private clearSilence(): void {
+    if (this.silence !== null) clearTimeout(this.silence)
+    this.silence = null
+  }
+
+  private clearTimers(): void {
+    this.clearSilence()
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = null
   }
 }

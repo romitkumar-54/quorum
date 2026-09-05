@@ -46,6 +46,8 @@ export default function Gallery() {
   const sessionRef = useRef<InterviewSession | null>(null)
   const transportRef = useRef<SimulatedTransport | null>(null)
   const earRef = useRef<CandidateEar | null>(null)
+  /** The microphone callback needs the live value, not the one captured at start(). */
+  const busyRef = useRef(false)
 
   const [mode, setMode] = useState<ChannelMode>('coordinated')
   const [sources, setSources] = useState(idleSources)
@@ -60,6 +62,7 @@ export default function Gallery() {
   const [busy, setBusy] = useState(false)
   const [answer, setAnswer] = useState('')
   const [listening, setListening] = useState(false)
+  const [hearing, setHearing] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
   const [voiceSupported, setVoiceSupported] = useState(false)
   const [agoraLive, setAgoraLive] = useState(false)
@@ -178,16 +181,24 @@ export default function Gallery() {
   const runTurn = useCallback(
     async (text: string, at?: number) => {
       const session = sessionRef.current
-      if (!session || busy || !text.trim()) return
+      if (!session || busyRef.current || !text.trim()) return
+      busyRef.current = true
       setBusy(true)
       setAssessment(null)
+      setHearing('')
+      // The panel is about to speak through the same speakers the microphone is
+      // listening to. Deafen it, or the interviewers come back as the
+      // candidate's next answer.
+      earRef.current?.mute()
       try {
         await play(session.candidateSays(text, at))
       } finally {
+        earRef.current?.unmute()
+        busyRef.current = false
         setBusy(false)
       }
     },
-    [busy, play],
+    [play],
   )
 
   const nextRehearsedTurn = useCallback(async () => {
@@ -199,9 +210,11 @@ export default function Gallery() {
 
   const runWholeDemo = useCallback(async () => {
     const session = sessionRef.current
-    if (!session || busy) return
+    if (!session || busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     setAssessment(null)
+    earRef.current?.mute()
     try {
       for (let i = demoIndex; i < DEMO_TRANSCRIPT.length; i++) {
         const turn = DEMO_TRANSCRIPT[i]
@@ -211,15 +224,18 @@ export default function Gallery() {
       }
       setAssessment(session.assessment())
     } finally {
+      earRef.current?.unmute()
+      busyRef.current = false
       setBusy(false)
     }
-  }, [busy, demoIndex, play])
+  }, [demoIndex, play])
 
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
       transportRef.current?.interrupt()
       earRef.current?.stop()
       setListening(false)
+      setHearing('')
       sessionRef.current?.reset(nextMode)
       setMode(nextMode)
       setSources(idleSources)
@@ -240,23 +256,27 @@ export default function Gallery() {
     const ear = earRef.current
     if (!ear) return
 
-    if (listening) {
+    if (ear.listening) {
       ear.stop()
       setListening(false)
+      setHearing('')
       return
     }
 
-    const started = ear.start(
-      (heard) => {
-        if (heard.final) void runTurn(heard.text)
-      },
-      (message) => {
+    const started = ear.start({
+      // A turn arrives already ended on silence, so it goes straight to the
+      // coordinator down the same path the typed box uses.
+      onTurn: (heard) => void runTurn(heard.text),
+      onInterim: setHearing,
+      onError: (message) => {
         setNotice(message)
         setListening(false)
+        setHearing('')
       },
-    )
+    })
+    if (started) setNotice(null)
     setListening(started)
-  }, [listening, runTurn])
+  }, [runTurn])
 
   useEffect(() => () => earRef.current?.stop(), [])
 
@@ -319,7 +339,9 @@ export default function Gallery() {
           Next turn
         </button>
 
-        <button type="button" className="btn" onClick={toggleMic} disabled={busy}>
+        {/* Deliberately never disabled: you must be able to cut the microphone
+            while the panel is mid-sentence. */}
+        <button type="button" className="btn" onClick={toggleMic}>
           {listening ? 'Stop microphone' : 'Answer by voice'}
         </button>
 
@@ -359,6 +381,14 @@ export default function Gallery() {
           </button>
         </form>
       </div>
+
+      {listening && (
+        <div className="controls">
+          <span className="hearing" data-muted={busy} aria-live="polite">
+            {hearing ? `“${hearing}”` : busy ? 'Microphone off while the panel speaks' : 'Listening…'}
+          </span>
+        </div>
+      )}
 
       {notice && (
         <div className="controls" style={{ color: 'var(--bid)' }}>
