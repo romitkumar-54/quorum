@@ -1,112 +1,186 @@
 # How Quorum uses Agora Conversational AI
 
-*A required submission artifact, and the honest answer to "could you have built this on something else".*
+*A required submission artifact, and the honest answer to "could you have built
+this on something else".*
+
+Everything on this page has been run against the live API. Where Agora's
+behaviour differs from Agora's documentation, the behaviour is what is written
+here.
 
 ## Why a panel is not a call
 
-Every other track in this hackathon is shaped like a one-to-one call, and is buildable on Vapi, Retell or ElevenLabs. Ours is not.
+Every other track in this hackathon is shaped like a one-to-one call, and is
+buildable on Vapi, Retell or ElevenLabs. Ours is not.
 
-A panel is **three AI agents inside one RTC channel**, each joining with its own agent identity and each controlling whose audio it subscribes to. That is native to Agora Conversational AI and awkward-to-impossible elsewhere, because the competing products model a conversation as one assistant and one user.
+Agora Conversational AI gives you a **complete** agent: it hears the user,
+transcribes, thinks, speaks, detects end-of-speech, and can be interrupted. If
+Quorum needed one interviewer, there would be no project — there would be one
+`join` call.
 
-It is also where the real engineering problem comes from. `remote_rtc_uids` decides what each agent hears. Set it so the agents hear the whole channel and they hear the candidate stop at the same instant — so all three answer, over each other. Silence detection, a bid and priority policy, and one agent yielding mid-sentence are what turn three voices into a panel.
+Quorum needs three, in one channel, and that is where the API stops helping.
+**An agent instance has no concept of another agent instance.** There is no
+field that coordinates two of them. Three complete agents in one channel is
+three people talking at once, forever, and Agora will do exactly that.
 
-**The floor-control problem is created by Agora's own primitives, and solved with them.**
+**The floor-control problem is created by Agora's own primitives, and solved
+with them.**
+
+## Every model is Agora's
+
+`credential_mode: "managed"` on all three blocks. There is no OpenAI key in this
+project, no TTS key, and no fifth credential in `.env.example`.
+
+| Stage | Vendor | Model |
+| --- | --- | --- |
+| ASR | Deepgram (managed) | `nova-3`, `en-IN` |
+| LLM | OpenAI (managed) | `gpt-4.1-mini` |
+| TTS | OpenAI (managed) | `tts-1` — `onyx` / `nova` / `shimmer` |
+
+Two corrections the live API forced, both worth knowing if you build on this:
+
+- **`ares` is rejected on our account.** It is on Agora's published managed
+  vendor list. The join fails with *"vendor 'ares' is not available for the
+  current SKU when credential_mode is 'managed'"*. Deepgram `nova-3` accepted
+  `en-IN` on the same request.
+- **`params.url` is required even in managed mode.** Agora holds the key but
+  still wants the vendor endpoint. Omitting it fails with *"required field is
+  missing"*. This is not in the managed-mode documentation.
+
+## The field this project turns on
+
+```
+remote_rtc_uids  —  "Currently, only one user ID is supported."
+```
+
+One uid. There is no wildcard on this field. (`["*"]` **is** documented for
+Agora Conversational AI — but for `tools`, which is a different field. We
+designed against that misreading for a day, and it could never have run.)
+
+So the panel *cannot* be made to hear itself, and that constraint produced the
+architecture rather than blocking it:
+
+| Mode | `remote_rtc_uids` | What happens |
+| --- | --- | --- |
+| `naive` | `["1000"]` — the candidate | All three hear the same silence, all three models fire, all three speak. Nothing decides. |
+| `coordinated` | `["1099"]` — a uid nobody joins as | Every agent is deaf. None self-triggers. The coordinator grants the floor to exactly one. |
+
+Both are real Agora configurations. The A/B in the demo is not a simulation of
+a collision — it is a collision.
+
+`idle_timeout: 0` is required in coordinated mode. Agora exits an agent once the
+users in `remote_rtc_uids` have left, and uid 1099 never arrives, so any
+non-zero timeout kills the whole panel mid-interview.
 
 ## The mapping
 
-Our coordinator does not sit awkwardly on top of Agora. Its four decisions are four Agora calls:
+The coordinator does not sit awkwardly on top of Agora. Its decisions are Agora
+calls:
 
 | Coordinator decision | Agora Conversational AI call |
 | --- | --- |
 | Agent joins the panel | `POST /v2/projects/{appid}/join` — once per interviewer |
-| Floor granted | `POST /v2/projects/{appid}/agents/{agentId}/speak` · `priority: APPEND` |
-| Interrupt — cut in | `POST …/agents/{agentId}/speak` · `priority: INTERRUPT` |
+| **Floor granted** | `POST …/agents/{agentId}/think` — the agent's own model answers |
+| Say this exact line | `POST …/agents/{agentId}/speak` · `priority: APPEND` |
+| Cut in | `POST …/agents/{agentId}/speak` · `priority: INTERRUPT` |
 | Yield — stand down | `POST …/agents/{agentId}/interrupt` |
+| What was said | `GET …/agents/{agentId}/history` |
 | Session ends | `POST …/agents/{agentId}/leave` |
-
-`priority: INTERRUPT` versus `APPEND` **is** floor control at the API level. The coordinator decides which of the two a given agent gets, and that decision is the project.
 
 Implemented in `src/app/api/agent/route.ts`.
 
-## One join per interviewer
+### `think` is the seam
 
-Each interviewer is a separate agent instance, with its own RTC identity, its own voice and its own role prompt:
+`think` injects text into one agent's pipeline as if the candidate had said it.
+The agent's Agora-managed model writes the reply and speaks it.
 
-```jsonc
-{
-  "name": "quorum-interview-01-product",
-  "properties": {
-    "channel": "interview-01",
-    "agent_rtc_uid": "1002",          // distinct per interviewer
+That single call is what lets the words be **dynamic** — written by a model, in
+character, never scripted — while the decision of *who was asked* stays in our
+code, where the invariant "exactly one interviewer speaks" can be proved rather
+than hoped for.
 
-    // The field this entire project turns on. Every participant means each
-    // agent hears the other two as well as the candidate — so all three
-    // detect the same end-of-speech. The coordinator is what makes that safe.
-    "remote_rtc_uids": ["*"],
-
-    "turn_detection": {
-      "mode": "default",
-      "config": {
-        "speech_threshold": 0.5,
-        // End-of-speech detection is what opens the floor. This value and the
-        // coordinator's silence threshold are the same knob.
-        "end_of_speech": { "mode": "vad", "vad_config": { "silence_duration_ms": 600 } }
-      }
-    },
-
-    "llm": {
-      "system_messages": [{ "role": "system", "content": "<the interviewer's role>" }],
-      "max_history": 32
-    },
-
-    // Three roles, three voices. The panel must not sound like one person.
-    "tts": {
-      "vendor": "microsoft",
-      "params": { "voice_name": "en-US-AvaMultilingualNeural" }
-    },
-    "asr": { "language": "en-US" }
-  }
-}
+```
+on_listening_action: "interrupt"   pick up the new turn immediately
+on_thinking_action:  "interrupt"   abandon a stale thought
+on_speaking_action:  "ignore"      never let an agent talk over itself
+interruptable: true                the candidate can always cut in
 ```
 
-Voices assigned per role: Technical `en-US-AndrewMultilingualNeural`, Product `en-US-AvaMultilingualNeural`, Behavioural `en-GB-SoniaNeural`.
+A coordinator-driven turn is identifiable in `history` by
+`metadata.start_type: "api_think"`.
+
+## Tokens
+
+Minted per join, signed for one channel and one uid, using the App Certificate.
+The certificate never leaves the server; only the token does. The browser gets a
+candidate token for uid 1000 from the same route.
+
+This is worth stating plainly because the failure mode is silent:
+
+```
+token: ""   with an App Certificate enabled
+
+  POST /join            -> HTTP 200,  status: RUNNING
+  GET  /agents/{id}     -> [0.7s]     RUNNING
+                          [3.1s]      FAILED
+                          "agent exits with reason: RTC connection error"
+```
+
+The join *succeeds*. The agent dies a second later. Nothing in the join response
+suggests anything is wrong.
 
 ## Barge-in
 
-Agora handles interruption of an agent by the candidate natively — that is requirement 1, and it costs us nothing. What Agora does *not* decide is which of three agents should be the one talking. That is ours.
-
 Both directions are needed for the demo to survive a judge talking over it:
 
-- **Candidate interrupts an agent** — Agora's turn detection, `interruptable: true` on every `speak`.
-- **Agent interrupts an agent** — our coordinator, via `priority: INTERRUPT` plus an `interrupt` call on the agent standing down.
-
-## Running it
-
-The app runs today with **no credentials**, on the browser's speech engine, so the demo never depends on a network. `GET /api/agent` reports `configured: false` and the UI says `simulated` in the header rather than overselling.
-
-To switch the voice layer to Agora, set these and restart:
-
-```bash
-AGORA_APP_ID=            # console.agora.io → your project
-AGORA_CUSTOMER_ID=       # RESTful API customer ID
-AGORA_CUSTOMER_SECRET=   # RESTful API customer secret
-AGORA_RTC_TOKEN=         # channel token, or leave blank in testing mode
-
-LLM_API_KEY=             # one LLM per interviewer role
-LLM_MODEL=gpt-4o-mini
-TTS_KEY=                 # Microsoft TTS, for three distinct voices
-TTS_REGION=eastus
-```
-
-The header switches to `agora`, and `AgoraTransport` takes the audio path. Nothing above the `Transport` interface changes — not the coordinator, not the brief, not the UI. That is why the interface was written on day one.
+- **Candidate interrupts an agent** — Agora's turn detection, `interruptable:
+  true` on every `think` and `speak`. Requirement 1, and it costs us nothing.
+- **Agent interrupts an agent** — our coordinator, via `priority: INTERRUPT`
+  plus an `interrupt` call on the agent standing down.
 
 ## What is real today, stated plainly
 
 | | Status |
 | --- | --- |
-| Coordinator, brief, analysis, metrics, report | **Real.** Framework-free TypeScript, 27 tests. |
-| Channel semantics — agent IDs, `remote_rtc_uids` subscription | **Modelled** faithfully in `SimulatedTransport`. |
-| Voice in and out | **Real**, on the browser's speech engine. |
-| Agora as the audio transport | **Wired, inert** until credentials are set. |
+| Three agents in one Agora channel, coordinated | **Real.** Runs. Output below. |
+| Managed ASR + LLM + TTS, no external keys | **Real.** Verified at join. |
+| `think` / `speak` / `interrupt` / `history` / `leave` | **Real.** All return 200 against the live API. |
+| Per-join token minting | **Real.** |
+| Coordinator, brief, analysis, metrics, report | **Real.** Framework-free TypeScript, 84 tests. |
+| Browser joins the RTC channel and you hear it | **Not yet.** The route mints the candidate token; the Web SDK join is the next piece. |
 
-One caveat we would rather state than have found: with the browser synthesiser, colliding agents queue instead of overlapping, because it is a single audio channel. The collision is still counted and still shown — three lamps go red at once — but the *sound* of three people talking over each other needs Agora, where each agent has its own track. It is one more thing a panel gets that a call does not.
+One run of the panel, through the app's own API, unedited:
+
+```
+POST join  -- three interviewers, coordinated mode (all deaf)
+  technical    A44CJ73JF72TL66MP83ER94PJ46TP67M
+  product      A44CF67RR29WH45NT53TM54HW57AD72M
+  behavioural  A44CT42MT79EK37NW32MM54DN77MT59N
+
+candidate: "I built a caching layer with Redis for our checkout service,
+            and it cut p99 latency a lot."
+
+coordinator grants the floor to: technical
+  technical    "How do you handle cache invalidation to ensure data
+                consistency during checkout?"
+  product      (silent)
+  behavioural  (silent)
+
+second turn -- coordinator moves the floor to: product
+  product      "How did reducing the checkout time by 400 milliseconds
+                impact user conversion or satisfaction?"
+  behavioural  (silent)
+```
+
+Two turns, two speakers, one voice each time, and both questions written by
+Agora's managed model rather than by us.
+
+## Running it
+
+```bash
+npm install
+cp .env.example .env.local     # then fill in the four Agora values
+npm run dev                    # http://localhost:3000
+```
+
+With no credentials the app falls back to the browser's speech engine and the
+header reads `simulated`, rather than pretending to have joined.

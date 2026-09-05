@@ -5,6 +5,74 @@ into the Atrium room as-is.
 
 ---
 
+## 2026-09-06 — The design is no longer a plan. It ran.
+
+Everything below this entry was reasoned from documentation. This one was
+measured against the live API, and three of the assumptions were wrong.
+
+**The panel works end to end.** Three interviewers joined one channel, all deaf.
+The coordinator granted the floor to one, that agent's Agora-managed model wrote
+the line and spoke it, and the other two stayed silent. Then the floor moved and
+the same thing happened for the second agent. Nobody collided.
+
+```
+coordinator grants floor -> technical
+  technical    "How do you handle cache invalidation to ensure data
+                consistency during checkout?"
+  product      (silent)
+  behavioural  (silent)
+
+coordinator moves floor  -> product
+  product      "How did reducing the checkout time by 400 milliseconds
+                impact user conversion or satisfaction?"
+  behavioural  (silent)
+```
+
+Both questions came out of Agora's managed `gpt-4.1-mini`. No external model is
+involved anywhere in this project.
+
+### What the live API corrected
+
+| Assumption | Reality |
+| --- | --- |
+| `remote_rtc_uids: ["*"]` lets agents hear each other | No such wildcard on this field. One uid only. The `["*"]` in the docs is for `tools`. |
+| A deaf agent might not be allowed | Accepted. `["1099"]`, a uid nobody joins as, works and the agent stays RUNNING. |
+| ARES for ASR, since it supports `en-IN` | Rejected: *"vendor 'ares' is not available for the current SKU when credential_mode is 'managed'"*. Deepgram `nova-3` takes `en-IN` and was accepted. |
+| Managed mode means no vendor URL needed | `params.url` is still required. Omitting it fails with *"required field is missing"*. Undocumented. |
+| `think` might not be reachable over REST | It is. `POST /v2/projects/{appid}/agents/{agentId}/think`. This resolves the item deferred on 2026-09-05. |
+
+### The failure that cost the most
+
+With an App Certificate enabled and `token: ""`, Agora **accepts** the join,
+returns `status: RUNNING`, and then kills the agent about a second later:
+
+```
+[0.7s] RUNNING
+[3.1s] FAILED  -- "agent exits with reason: RTC connection error"
+```
+
+The join succeeding is what makes this expensive to diagnose. Tokens are now
+minted per join in `src/app/api/agent/route.ts`, signed for one channel and one
+uid, and `AGORA_RTC_TOKEN` is gone from the environment.
+
+### The shape that resulted
+
+`think` is the seam the project turns on. It injects text into one agent's
+pipeline as if the candidate had said it, so the words come from Agora's model
+while the choice of who was asked stays in our code. Dynamic and deterministic,
+with neither half guessing at the other's job.
+
+`GET /agents/{id}/history` is how the transcript learns what was said, since in
+coordinated mode the words are written inside Agora and never pass through this
+process. A coordinator-driven turn is identifiable there by
+`metadata.start_type: "api_think"`.
+
+**Still open:** the browser does not yet join the RTC channel, so nothing is
+audible in the UI. The route mints a candidate token (`action: 'token'`, uid
+1000) and the Web SDK join is the next piece.
+
+---
+
 ## 2026-09-05 — The coordinator owns the brain; Agora agents are voices
 
 Agora Conversational AI's `turn_detection` supports only `agora_vad`,

@@ -10,7 +10,7 @@ Built by team **Newbiezz** for **EchoSphere: the Agora Conversational AI Hackath
 
 Interview practice today is a chatbot asking scripted questions. Real panels are nothing like that: people interrupt, disagree, and challenge from different angles. Candidates fail on that dynamic, not on the answer.
 
-Put three AI interviewers in one voice channel and you meet the actual engineering problem immediately. Each agent subscribes to the channel through `remote_rtc_uids`. Set it to `"*"` and every agent hears the candidate *and each other* — so all three detect the same end-of-speech and all three answer at once.
+Put three AI interviewers in one voice channel and you meet the actual engineering problem immediately. Agora gives you a *complete* agent — it hears, thinks, speaks and can be interrupted — but an agent instance has no concept of another agent instance. Three complete agents in one channel is three people answering the same silence at once, and Agora will do exactly that.
 
 **A fixed rotation looks identical on a slide. The difference shows the moment someone talks over the panel.**
 
