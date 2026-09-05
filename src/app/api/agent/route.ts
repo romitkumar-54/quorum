@@ -30,6 +30,7 @@
 import { NextResponse } from 'next/server'
 import { RtcRole, RtcTokenBuilder } from 'agora-token'
 import { signAgents, verifyAgents } from '@/core/agentHandle'
+import { INTERVIEW_LIMITS } from '@/core/interviewPolicy'
 
 export const maxDuration = 60
 
@@ -380,8 +381,8 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
           mode: 'default',
           config: {
             speech_threshold: 0.5,
-            // The coordinator's silence threshold and this value are one knob.
-            end_of_speech: { mode: 'vad', vad_config: { silence_duration_ms: 4000 } },
+            // Share the browser's two-second pause, within Agora's 2000 ms cap.
+            end_of_speech: { mode: 'vad', vad_config: { silence_duration_ms: INTERVIEW_LIMITS.answerSilenceMs } },
           },
         },
       },

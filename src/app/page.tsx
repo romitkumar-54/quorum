@@ -26,6 +26,8 @@ import {
 import { InterviewSession, type SessionStep } from '@/core/session'
 import { EMPTY_METRICS, type Metrics } from '@/core/metrics'
 import type { Assessment } from '@/core/brief'
+import { detectBehavior } from '@/core/brief/analyzer'
+import { END_MESSAGES, INTERVIEW_LIMITS, type EndReason } from '@/core/interviewPolicy'
 import { SimulatedTransport } from '@/transport/simulated'
 import { AgoraTransport } from '@/transport/agora'
 import { RtcChannel } from '@/transport/rtcChannel'
@@ -92,6 +94,9 @@ export default function Gallery() {
   const generationRef = useRef(0)
   /** A mute the candidate asked for, which the panel's own muting must not undo. */
   const mutedRef = useRef(false)
+  const startedAtRef = useRef(0)
+  const lastActivityRef = useRef(0)
+  const closingRef = useRef(false)
 
   const [mode, setMode] = useState<ChannelMode>('coordinated')
   const [channelName, setChannelName] = useState(DEFAULT_CHANNEL.channelName)
@@ -117,6 +122,9 @@ export default function Gallery() {
   const [rtcJoined, setRtcJoined] = useState(false)
   const [llmLive, setLlmLive] = useState(false)
   const [ready, setReady] = useState(false)
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [endReason, setEndReason] = useState<EndReason | null>(null)
+  const [cleanupFailed, setCleanupFailed] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -193,7 +201,7 @@ export default function Gallery() {
       // Leave the channel on unmount. Every agent left sitting in a channel
       // bills, and a hot reload should not quietly open a second candidate.
       void rtcRef.current?.leave()
-      void transportRef.current?.leave()
+      void transportRef.current?.leave().catch(() => undefined)
     }
   }, [])
 
@@ -207,6 +215,61 @@ export default function Gallery() {
     setYieldedIds(new Set(session.yieldedEventIds()))
   }, [])
 
+  const endInterview = useCallback(async (reason: EndReason = 'candidate') => {
+    if (closingRef.current) return
+    closingRef.current = true
+    setCleanupFailed(false)
+    const generation = ++generationRef.current
+    sessionRef.current?.cancel()
+    busyRef.current = true
+    setBusy(true)
+    setThinking(false)
+    earRef.current?.stop()
+    setListening(false)
+    setHearing('')
+    setSources(idleSources)
+    setEndReason(reason)
+    setPhase('closed')
+    refresh()
+    setAssessment(sessionRef.current?.assessment() ?? null)
+    const transport = transportRef.current
+    const rtc = rtcRef.current
+    void rtc?.leave().catch(() => undefined)
+    setRtcJoined(false)
+    // Report immediately, but keep Start disabled until agent cleanup finishes.
+    // Failed cleanup remains retryable and is never reported as success.
+    let left = false
+    for (let attempt = 0; attempt < 3 && !left; attempt++) {
+      try { await transport?.leave(); left = true } catch {
+        if (attempt < 2) await sleep(700)
+      }
+    }
+    closingRef.current = false
+    if (generation !== generationRef.current) return
+    if (!left) {
+      setCleanupFailed(true)
+      setNotice('The interview has ended, but the service could not confirm that all interviewers left. Retry closing the panel.')
+      return
+    }
+    transportRef.current = simulatedRef.current
+    busyRef.current = false
+    setBusy(false)
+  }, [refresh])
+
+  useEffect(() => {
+    if (phase !== 'live') return
+    const check = () => {
+      const now = Date.now()
+      if (!startedAtRef.current) return
+      setElapsedSeconds(Math.floor((now - startedAtRef.current) / 1000))
+      if (now - startedAtRef.current >= INTERVIEW_LIMITS.maxDurationMs) void endInterview('time_limit')
+      else if (!busyRef.current && now - lastActivityRef.current >= INTERVIEW_LIMITS.inactivityMs) void endInterview('inactivity')
+    }
+    const timer = window.setInterval(check, 1000)
+    window.addEventListener('focus', check)
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', check) }
+  }, [phase, endInterview])
+
   // ── Play one candidate turn through the panel ─────────────────────────────
   const play = useCallback(
     async (step: SessionStep) => {
@@ -215,6 +278,7 @@ export default function Gallery() {
       if (!transport) return
 
       const grant = step.decisions[0]
+      if (!grant) { refresh(); return }
       setDecision(grant)
       refresh()
 
@@ -308,6 +372,7 @@ export default function Gallery() {
       busyRef.current = true
       const generation = generationRef.current
       setBusy(true)
+      lastActivityRef.current = Date.now()
       setAssessment(null)
       setHearing('')
       // The panel is about to speak through the same speakers the microphone is
@@ -320,6 +385,10 @@ export default function Gallery() {
         // what `thinking` exists to explain.
         const step = await session.candidateSays(text, at)
         if (generation !== generationRef.current) return
+        if (step.endReason) {
+          await endInterview(step.endReason)
+          return
+        }
         setThinking(false)
         await play(step)
       } catch (error) {
@@ -333,16 +402,18 @@ export default function Gallery() {
           if (!mutedRef.current) earRef.current?.unmute()
           busyRef.current = false
           setBusy(false)
+          lastActivityRef.current = Date.now()
         }
       }
     },
-    [play, refresh],
+    [play, refresh, endInterview],
   )
 
   const startListening = useCallback(() => {
     earRef.current?.start({
       onTurn: heard => { void runTurn(heard.text) },
-      onInterim: setHearing,
+      onInterim: text => { setHearing(text); if (text) lastActivityRef.current = Date.now() },
+      shouldRedirect: text => detectBehavior(text) !== null,
       onListening: setListening,
       onError: setNotice,
     })
@@ -412,6 +483,11 @@ export default function Gallery() {
     try {
 
     setPhase('live')
+    startedAtRef.current = Date.now()
+    lastActivityRef.current = Date.now()
+    setElapsedSeconds(0)
+    setEndReason(null)
+    setCleanupFailed(false)
     setSources(idleSources)
     setDecision(null)
     setDecisions([])
@@ -457,7 +533,7 @@ export default function Gallery() {
       if (generation === generationRef.current) {
         setNotice(error instanceof Error ? error.message : 'Could not start the interview. Please try again.')
         ear?.stop()
-        void transportRef.current?.leave()
+        void transportRef.current?.leave().catch(() => setNotice('The start failed and panel cleanup could not be confirmed. Please retry closing the panel.'))
         setPhase('idle')
       }
     } finally {
@@ -466,29 +542,10 @@ export default function Gallery() {
         if (!mutedRef.current) ear?.unmute()
         busyRef.current = false
         setBusy(false)
+        lastActivityRef.current = Date.now()
       }
     }
   }, [mode, openPanel, play, startListening, refresh])
-
-  const endInterview = useCallback(() => {
-    generationRef.current++
-    sessionRef.current?.cancel()
-    busyRef.current = false
-    setBusy(false)
-    setThinking(false)
-    earRef.current?.stop()
-    void transportRef.current?.interrupt().catch(() => undefined)
-    // Send the panel home. With `idle_timeout: 0` an Agora agent never exits on
-    // its own, so an interview that is over but not left keeps billing.
-    void transportRef.current?.leave()
-    transportRef.current = simulatedRef.current
-    void rtcRef.current?.leave()
-    setRtcJoined(false)
-    setListening(false)
-    setHearing('')
-    setPhase('closed')
-    setAssessment(sessionRef.current?.assessment() ?? null)
-  }, [])
 
   /** Not push-to-talk. A way to stop transmitting, which a live interview needs. */
   const toggleMute = useCallback(() => {
@@ -507,8 +564,8 @@ export default function Gallery() {
 
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
-      transportRef.current?.interrupt()
-      void transportRef.current?.leave()
+      void transportRef.current?.interrupt().catch(() => undefined)
+      void transportRef.current?.leave().catch(() => undefined)
       transportRef.current = simulatedRef.current
       earRef.current?.stop()
       setListening(false)
@@ -524,6 +581,7 @@ export default function Gallery() {
       setAssessment(null)
       setYieldedIds(new Set())
       setNotice(null)
+      setEndReason(null)
       setPhase('idle')
       mutedRef.current = false
       setMuted(false)
@@ -590,7 +648,7 @@ export default function Gallery() {
           </button>
         ) : (
           <>
-            <button type="button" className="btn" data-danger="true" onClick={endInterview}>
+            <button type="button" className="btn" data-danger="true" onClick={() => void endInterview()}>
               End interview
             </button>
             {/* Never disabled. You must be able to stop transmitting even while
@@ -606,6 +664,14 @@ export default function Gallery() {
         </button>
       </div>
 
+      <div className="controls" aria-live="polite">
+        {phase === 'closed' && endReason ? END_MESSAGES[endReason] : phase === 'live'
+          ? `Answer ${Math.min(brief.turn + 1, INTERVIEW_LIMITS.maxAnswers)} of up to 12 · ${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')} / 15:00`
+          : 'About 9 answers across three areas. Ends automatically by 12 answers or 15 minutes, or after 2 minutes without activity.'}
+        {phase === 'closed' && busy && !cleanupFailed && <span> Closing the panel…</span>}
+        {phase === 'closed' && cleanupFailed && <button type="button" className="btn" onClick={() => void endInterview(endReason ?? 'candidate')}>Retry closing the panel</button>}
+      </div>
+
       {phase === 'live' && (
         <div className="controls">
           <span className="hearing" data-muted={busy || muted} aria-live="polite">
@@ -617,7 +683,7 @@ export default function Gallery() {
                   ? `“${hearing}”`
                   : busy
                     ? 'Microphone off while the panel answers'
-                    : listening ? 'Listening… Take your time. A 4-second pause sends your answer.' : 'Microphone reconnecting or unavailable — retry or type your answer.'}
+                    : listening ? `Listening… A ${INTERVIEW_LIMITS.answerSilenceMs / 1000}-second pause sends your answer.` : 'Microphone reconnecting or unavailable — retry or type your answer.'}
           </span>
           <button type="button" className="btn" disabled={busy || muted || !hearing} onClick={() => earRef.current?.finishTurn()}>Done answering</button>
           {!listening && !busy && <button type="button" className="btn" onClick={startListening}>Retry microphone</button>}
@@ -638,7 +704,7 @@ export default function Gallery() {
         >
           <input
             value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
+            onChange={(event) => { setAnswer(event.target.value); lastActivityRef.current = Date.now() }}
             placeholder="…or type instead, if the microphone will not cooperate"
             disabled={busy}
             aria-label="Your answer"

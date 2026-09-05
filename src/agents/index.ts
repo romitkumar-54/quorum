@@ -8,7 +8,7 @@
  * on screen and the words out of the speaker are the same reason.
  */
 
-import { AGENTS, type AgentId, type Brief, type Flag, type FloorDecision, type TranscriptEvent } from '@/core/contracts'
+import { type AgentId, type Brief, type Flag, type FloorDecision, type TranscriptEvent } from '@/core/contracts'
 import { formatTimestamp } from '@/core/transcript'
 
 export interface GenerationInput {
@@ -44,6 +44,7 @@ export const OPENING_LINE = [
   'Hello, and thanks for making the time today.',
   'You are speaking with an AI panel rather than with people —',
   'there are three of us, and we will take it in turns.',
+  'We will cover three areas in about nine answers, with a limit of twelve answers or fifteen minutes.',
   'Whenever you are ready, tell us a little about yourself',
   'and a piece of work you are proud of.',
 ].join(' ')
@@ -53,7 +54,7 @@ export const OPENING_LINE = [
  * and every sentence is traceable to a flag or to the current difficulty.
  */
 export class ScriptedGenerator implements QuestionGenerator {
-  async next({ agent, brief, justifiedBy, opening }: GenerationInput): Promise<string> {
+  async next({ agent, brief, justifiedBy, opening, transcript }: GenerationInput): Promise<string> {
     // The first thing anyone hears. It has to greet, it has to disclose that
     // the panel is not human, and it has to open with something answerable --
     // walking into a cold specific question is what made this feel abrupt.
@@ -63,43 +64,38 @@ export class ScriptedGenerator implements QuestionGenerator {
     if (opening) return OPENING_LINE
 
     const flag = justifiedBy[0]
+    const asked = new Set(transcript.filter(e => e.speaker !== 'candidate').map(e => e.text))
+    if (flag?.kind === 'off_topic' || flag?.kind === 'evasion') {
+      const previous = [...transcript].reverse().find(e => e.speaker !== 'candidate')?.text
+      const pending = previous?.match(/[^.!?]*\?/)?.[0]?.trim()
+      return `${flag.kind === 'off_topic' ? 'That takes us away from the interview.' : 'Let us return to the question.'} ${pending ?? 'What was your own contribution to the work you mentioned?'}`
+    }
 
     if (flag?.kind === 'unchallenged_impact') {
-      return 'Who does that help? You said it got faster — faster for whom, and by how much?'
+      const line = 'What measured change did the people using your work experience?'
+      if (!asked.has(line)) return line
     }
 
     if (flag?.kind === 'contradiction') {
       const [earlier, later] = flag.evidence
-      return `Hold on. At ${formatTimestamp(earlier.t)} you said "${stripPeriod(earlier.quote)}". At ${formatTimestamp(later.t)} it became "${stripPeriod(later.quote)}". Which was it?`
+      if (earlier && later) return `At ${formatTimestamp(earlier.t)} you said "${stripPeriod(earlier.quote).slice(0, 100)}", and at ${formatTimestamp(later.t)} "${stripPeriod(later.quote).slice(0, 100)}". Were these the same project and stage?`
     }
 
     if (flag?.kind === 'vague') {
-      return 'Put a number on that. What did it go from, and what did it go to?'
+      const line = 'What concrete example or before-and-after result supports that claim?'
+      if (!asked.has(line)) return line
     }
 
-    return followUp(agent, brief)
+    return followUp(agent, brief, asked)
   }
 }
 
 /** No flag to press — ask the next question at the current difficulty. */
-function followUp(agent: AgentId, brief: Brief): string {
-  const lastClaim = [...brief.claims].reverse().find((c) => c.competency === AGENTS[agent].owns)
-
-  if (agent === 'technical') {
-    // The "correct, efficient" beat: acknowledge a solid answer, then push.
-    if (lastClaim?.specific) {
-      return brief.difficulty >= 4
-        ? 'Correct, efficient. Now what breaks at ten million keys and a cold cache?'
-        : 'Correct, efficient. What does that cost you in memory?'
-    }
-    return LADDER.technical[Math.min(brief.difficulty, 5) - 1]
-  }
-
-  if (agent === 'product') {
-    return LADDER.product[Math.min(brief.difficulty, 5) - 1]
-  }
-
-  return LADDER.behavioural[Math.min(brief.difficulty, 5) - 1]
+function followUp(agent: AgentId, brief: Brief, asked: Set<string>): string {
+  const ladder = LADDER[agent]
+  const start = Math.min(brief.difficulty, 5) - 1
+  const candidates = [...ladder.slice(start), ...ladder.slice(0, start)]
+  return candidates.find(line => !asked.has(line)) ?? `For answer ${brief.turn + 1}, what different example from your work would you like this interviewer to examine?`
 }
 
 /** Requirement 7 — the question gets harder as the candidate earns it. */
@@ -110,6 +106,13 @@ const LADDER: Record<AgentId, string[]> = {
     'What is the complexity, and where does it degrade?',
     'How would you keep that correct under concurrent writes?',
     'Design it again for ten million keys and a cold cache.',
+    'What failure case did you test before releasing that approach?',
+    'Which alternative did you reject, and what constraint ruled it out?',
+    'How would you detect a regression in production?',
+    'Where would you start investigating a sudden slowdown?',
+    'What would make you change the architecture you chose?',
+    'How would you recover if a dependency became unavailable?',
+    'What did your first implementation get wrong?',
   ],
   product: [
     'Who was this for?',
@@ -117,6 +120,13 @@ const LADDER: Record<AgentId, string[]> = {
     'How did you know it worked once it shipped?',
     'What would you have cut to ship it a week earlier?',
     'If this halved engagement, how would you have found out first?',
+    'What was the baseline before your change?',
+    'What evidence would show that your change did not cause the improvement?',
+    'Which group of users did your decision leave out?',
+    'What did you learn from a customer who did not use the feature?',
+    'Which cost did you accept to get that outcome?',
+    'What result would make you reverse your product decision?',
+    'What would you measure in the next experiment?',
   ],
   behavioural: [
     'Tell me who else was involved.',
@@ -124,6 +134,13 @@ const LADDER: Record<AgentId, string[]> = {
     'What did you disagree with the team about?',
     'Tell me about the call you got wrong on that project.',
     'Someone senior overrules you on this design. What do you do?',
+    'What did you say when someone disagreed with your approach?',
+    'What feedback made you change how you worked?',
+    'How did you explain a setback to the people depending on you?',
+    'What did you do personally to resolve the disagreement?',
+    'What would you do differently if that situation happened again?',
+    'How did you check that the other person understood your decision?',
+    'What did you learn from handing this work over to someone else?',
   ],
 }
 

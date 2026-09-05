@@ -29,6 +29,7 @@ export function Report({ assessment }: { assessment: Assessment }) {
             </div>
             <div className="verdict-score">{verdict.score === null ? 'Not assessed' : `${verdict.score}/5`}</div>
             <div className="verdict-text">{verdict.verdict}</div>
+            {verdict.gaps.length > 0 && <ul className="verdict-text">{verdict.gaps.map(gap => <li key={gap}>{gap}</li>)}</ul>}
 
             {verdict.evidence.length > 0 && (
               <div className="verdict-evidence">
@@ -44,6 +45,10 @@ export function Report({ assessment }: { assessment: Assessment }) {
         ))}
       </div>
 
+      {assessment.openFlags.length > 0 && <div className="verdict-text">
+        <h3>Still needs clarification</h3>
+        <ul>{assessment.openFlags.map(flag => <li key={flag.id}>{flag.note} {flag.evidence.map(e => `“${e.quote}”`).join(' → ')}</li>)}</ul>
+      </div>}
       <div className="final" data-split={assessment.split}>
         <div className="verdict-name">Final</div>
         <div className="verdict-score">{assessment.final === null ? 'Insufficient evidence' : `${assessment.final}/5`}</div>

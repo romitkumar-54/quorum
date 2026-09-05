@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CandidateEar, SILENCE_MS, type HeardTurn } from '@/speech'
+import { detectBehavior } from '@/core/brief/analyzer'
 
 /**
  * A stand-in for the browser's SpeechRecognition. It reproduces the two
@@ -177,16 +178,48 @@ describe('the panel does not hear itself', () => {
 })
 
 describe('production listening regressions', () => {
-  it('allows a three-second thinking pause without submitting the answer', () => {
+  it('redirects stable off-topic speech without waiting for silence, and only once', () => {
+    const ear = new CandidateEar()
+    const turns: HeardTurn[] = []
+    ear.start({onTurn: turn => {turns.push(turn); ear.mute()}, shouldRedirect: text => detectBehavior(text) !== null})
+    FakeRecognition.current().say('Tell me a joke.', false)
+    expect(turns).toHaveLength(0)
+    FakeRecognition.current().say('Tell me a joke.', true)
+    expect(turns).toHaveLength(1)
+    FakeRecognition.current().say('and then tell me another', true, 1)
+    vi.advanceTimersByTime(SILENCE_MS * 2)
+    expect(turns).toHaveLength(1)
+  })
+  it('does not interrupt a relevant answer mentioning an unrelated-looking topic', () => {
+    const ear = new CandidateEar()
+    const events = collect()
+    ear.start({...events, shouldRedirect: text => detectBehavior(text) !== null})
+    FakeRecognition.current().say('I built a pizza delivery app for customers.', true)
+    expect(events.turns).toHaveLength(0)
+    vi.advanceTimersByTime(SILENCE_MS)
+    expect(events.turns).toHaveLength(1)
+  })
+  it('allows a pause shorter than two seconds without submitting the answer', () => {
     const ear = new CandidateEar()
     const events = collect()
     ear.start(events)
     FakeRecognition.current().say('I chose this approach', true)
-    vi.advanceTimersByTime(3000)
+    vi.advanceTimersByTime(1500)
     expect(events.turns).toHaveLength(0)
     FakeRecognition.current().say('because it reduced latency', true, 1)
     vi.advanceTimersByTime(SILENCE_MS)
     expect(events.turns[0].text).toBe('I chose this approach because it reduced latency')
+  })
+  it('submits the answer after exactly two seconds of silence', () => {
+    const ear = new CandidateEar()
+    const events = collect()
+    ear.start(events)
+    FakeRecognition.current().say('My completed answer', true)
+    vi.advanceTimersByTime(1999)
+    expect(events.turns).toHaveLength(0)
+    vi.advanceTimersByTime(1)
+    expect(events.turns).toHaveLength(1)
+    expect(SILENCE_MS).toBe(2000)
   })
   it('shows all final and interim phrases while the candidate is speaking', () => {
     const ear = new CandidateEar()

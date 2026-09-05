@@ -19,6 +19,26 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals() })
 
 describe('deployed route regressions, exercised locally', () => {
+  it('seats the managed panel using Agora’s supported VAD range', async () => {
+    const payloads: Record<string, unknown>[] = []
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/join')) {
+        payloads.push(JSON.parse(String(init?.body)))
+        return Response.json({agent_id: `remote-${payloads.length}`})
+      }
+      return Response.json({list: []})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const {POST} = await import('@/app/api/agent/route')
+    const response = await POST(request({action: 'join', channelName: channel, mode: 'coordinated', agents: ['technical', 'product', 'behavioural'].map(agentId => ({agentId, systemPrompt: 'Interview the candidate.'}))}))
+    expect(await response.json()).toMatchObject({ok: true})
+    expect(payloads).toHaveLength(3)
+    for (const payload of payloads) expect(payload).toMatchObject({properties: {
+      remote_rtc_uids: ['1099'],
+      turn_detection: {config: {end_of_speech: {vad_config: {silence_duration_ms: 2000}}}},
+      llm: {credential_mode: 'managed', params: {model: 'gpt-4.1-mini'}},
+    }})
+  })
   it('uses relative token expiry of one hour, not a Unix timestamp', async () => {
     const {POST} = await import('@/app/api/agent/route')
     await POST(request({action: 'token', channelName: channel}))

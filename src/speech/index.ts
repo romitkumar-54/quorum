@@ -11,6 +11,7 @@
  */
 
 import { AGENTS, type AgentId } from '@/core/contracts'
+import { INTERVIEW_LIMITS } from '@/core/interviewPolicy'
 
 const isBrowser = () => typeof window !== 'undefined'
 
@@ -119,7 +120,7 @@ export class PanelVoice {
  * the phrase boundary. Tune this in rehearsal: too low and a thinking pause
  * cuts the candidate off.
  */
-export const SILENCE_MS = 4000
+export const SILENCE_MS = INTERVIEW_LIMITS.answerSilenceMs
 
 /** How long to wait before retrying a restart the browser refused. */
 const RESTART_RETRY_MS = 250
@@ -160,6 +161,8 @@ export interface EarHandlers {
   onInterim?: (text: string) => void
   onError?: (message: string) => void
   onListening?: (listening: boolean) => void
+  /** Inspect stable recognized phrases, never speculative interim words. */
+  shouldRedirect?: (finalText: string) => boolean
 }
 
 type RecognitionCtor = new () => SpeechRecognitionLike
@@ -442,6 +445,19 @@ export class CandidateEar {
     this.lastHeardAt = at
 
     this.handlers?.onInterim?.([this.finalText, interim].filter(Boolean).join(' '))
+    if (this.finalText && this.handlers?.shouldRedirect?.(this.finalText)) {
+      // Keep the stable text only. The panel can now redirect without waiting
+      // for the silence window in an ongoing unrelated monologue.
+      this.interimText = ''
+      this.clearSilence()
+      this.endTurn()
+      return
+    }
+    if (at - this.turnStart >= 90_000) {
+      this.clearSilence()
+      this.endTurn()
+      return
+    }
     this.armSilence()
   }
 

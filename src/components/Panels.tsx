@@ -112,7 +112,7 @@ export function BriefPanel({ brief }: { brief: Brief }) {
           <article key={flag.id} className="flag" data-addressed={flag.addressed}>
             <header className="flag-head">
               <span className="flag-kind">{flag.kind.replace(/_/g, ' ')}</span>
-              <span className="flag-status">{flag.addressed ? 'challenged' : 'open'}</span>
+              <span className="flag-status">{flag.resolvedBy ? 'clarified' : flag.addressed ? 'awaiting clarification' : 'open'}</span>
             </header>
             <p className="flag-note">{flag.note}</p>
             {flag.evidence.map((e, i) => (
@@ -121,6 +121,7 @@ export function BriefPanel({ brief }: { brief: Brief }) {
                 <span>“{e.quote}”</span>
               </div>
             ))}
+            {flag.resolvedBy && <div className="evidence"><span className="evidence-time">{formatTimestamp(flag.resolvedBy.t)}</span><span>Clarification: “{flag.resolvedBy.quote}”</span></div>}
           </article>
         ))
       )}

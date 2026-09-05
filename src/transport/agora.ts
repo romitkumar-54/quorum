@@ -104,7 +104,7 @@ export class AgoraTransport implements Transport {
   }
 
   async leave(): Promise<void> {
-    await this.post({ action: 'leave', channelName: this.channelName })
+    this.requireOK(await this.post({ action: 'leave', channelName: this.channelName }))
     this.connected = false
     this.joined = []
   }
@@ -126,6 +126,7 @@ export class AgoraTransport implements Transport {
       channelName: this.channelName,
       agentId: agent,
     })
+    this.requireOK(body)
     const contents = Array.isArray(body.contents) ? body.contents : []
 
     return contents

@@ -85,6 +85,18 @@ export interface Claim {
   relevant?: boolean
 }
 
+/** The question supplies context; only the answer supplies scored evidence. */
+export interface AnswerContext {
+  question?: TranscriptEvent
+}
+
+export interface AnswerRecord {
+  event: TranscriptEvent
+  question?: TranscriptEvent
+  competency?: Competency
+  disposition: 'answer' | 'off_topic' | 'evasion' | 'unknown'
+}
+
 export type FlagKind =
   /** Claim with no measurable backing — "a lot faster", "much better". */
   | 'vague'
@@ -121,6 +133,9 @@ export interface Flag {
   raisedAtTurn: number
   /** Set once an interviewer has actually challenged it on the floor. */
   addressed: boolean
+  /** The actual challenge, used to match a later answer to this concern. */
+  questionEventId?: string
+  resolvedBy?: Evidence
 }
 
 /**
@@ -138,6 +153,7 @@ export interface Brief {
   /** 1..5 — raised by specific answers, lowered by vague ones. */
   difficulty: number
   scores: Record<Competency, number>
+  answers?: AnswerRecord[]
 }
 
 export const EMPTY_BRIEF: Brief = {
@@ -146,6 +162,7 @@ export const EMPTY_BRIEF: Brief = {
   flags: [],
   difficulty: 2,
   scores: { algorithms: 0, impact: 0, communication: 0 },
+  answers: [],
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

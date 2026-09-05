@@ -135,7 +135,9 @@ describe('the floor is granted with think, not with a script', () => {
     const step = await session.candidateSays('I put Redis in front of checkout.', 1000)
 
     expect(step.utterances.map((u) => u.text)).toEqual(['How do you invalidate that cache?'])
-    expect(transport.thought).toEqual([{ agent: 'technical', text: 'I put Redis in front of checkout.' }])
+    expect(transport.thought).toHaveLength(1)
+    expect(transport.thought[0].agent).toBe('technical')
+    expect(JSON.parse(transport.thought[0].text.split('\n').slice(1).join('\n')).conversation).toEqual([{ speaker: 'candidate', text: 'I put Redis in front of checkout.' }])
   })
 
   it('hands the agent the candidate’s answer, not a composed question', async () => {
@@ -149,7 +151,8 @@ describe('the floor is granted with think, not with a script', () => {
 
     await session.candidateSays('It made things a lot faster.', 1000)
 
-    expect(transport.thought[0].text).toBe('It made things a lot faster.')
+    expect(transport.thought[0].text).toContain('It made things a lot faster.')
+    expect(transport.thought[0].text).toContain('questionsAlreadyAsked')
     // Nothing was said by us: the agent said it.
     expect(transport.spoken).toEqual([])
   })
@@ -183,6 +186,47 @@ describe('the floor is granted with think, not with a script', () => {
 
     expect(one.utterances[0].text).toBe('First question.')
     expect(two.utterances[0].text).toBe('Second question.')
+  })
+})
+
+describe('shared context and honest challenges', () => {
+  it('gives a new interviewer the preceding question, answer and shared brief', async () => {
+    const transport = new FakeAgora({technical: ['What was your cache expiry policy?'], product: ['What did that change for customers?']})
+    let turn = 0
+    const session = new InterviewSession({transport, ...fast, floor: {async pick() {return {agent: turn++ === 0 ? 'technical' : 'product', reason: 'rotate'}}}})
+    await session.candidateSays('I used a hash map to cache the lookup.')
+    await session.candidateSays('We expired it after 30 seconds because stale checkout prices were unacceptable.')
+    const context = JSON.parse(transport.thought[1].text.split('\n').slice(1).join('\n'))
+    expect(context.questionsAlreadyAsked).toContain('What was your cache expiry policy?')
+    expect(context.conversation.at(-1).text).toContain('30 seconds')
+    expect(context.claims.length).toBeGreaterThan(0)
+    expect(context.coverage.algorithms).toBeGreaterThan(0)
+  })
+  it('speaks an immediate redirect to the pending question without starting another model turn', async () => {
+    const transport = new FakeAgora()
+    const session = new InterviewSession({transport, ...fast})
+    session.transcript.append({speaker: 'technical', text: 'How did you test the cache?'})
+    const step = await session.candidateSays('Tell me a joke about pizza.')
+    expect(transport.thought).toHaveLength(0)
+    expect(step.utterances[0].text).toContain('How did you test the cache?')
+    expect(session.brief.current().flags[0]).toMatchObject({kind: 'off_topic', addressed: true})
+    expect(session.assessment().perAgent[0].score).toBe(1)
+    expect(session.assessment().perAgent[2].score).toBeNull()
+  })
+  it('leaves a flag open when the challenge could not be spoken', async () => {
+    const transport = new FakeAgora()
+    transport.speak = async () => {throw new Error('speech failed')}
+    const session = new InterviewSession({transport, ...fast})
+    await expect(session.candidateSays('Tell me a joke.')).rejects.toThrow('speech failed')
+    expect(session.brief.current().flags[0].addressed).toBe(false)
+  })
+  it('does not retrospectively interrupt an already completed live question', async () => {
+    const transport = new FakeAgora({technical: ['How was it tested?'], product: ['Who benefited?'], behavioural: ['What changed?']})
+    const session = new InterviewSession({transport, analyzer: everyoneBids(), ...fast})
+    const step = await session.candidateSays('My answer')
+    expect(step.utterances).toHaveLength(1)
+    expect(step.decisions).toHaveLength(1)
+    expect(session.brief.current().flags.filter(f => f.addressed)).toHaveLength(1)
   })
 })
 

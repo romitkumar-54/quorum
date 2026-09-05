@@ -93,11 +93,12 @@ describe('the demo beat', () => {
     expect(decisions[0].grantedTo).toBe('technical')
   })
 
-  it('has Technical accept the answer rather than press it', () => {
+  it('asks a technical follow-up without declaring an unverified claim correct', () => {
     // Technical owns algorithms. The hand-wavy sentence was about impact, so it
     // is not Technical's to challenge — it is satisfied, and says so.
     const technical = steps[0].utterances.find((u) => u.speaker === 'technical')
-    expect(technical?.text).toMatch(/correct, efficient/i)
+    expect(technical?.text).toMatch(/complexity/i)
+    expect(technical?.text).not.toMatch(/correct, efficient/i)
   })
 
   it('lets Product cut in over Technical for the unquantified impact', () => {
@@ -110,7 +111,7 @@ describe('the demo beat', () => {
 
   it('says the line it was granted the floor to say', () => {
     const product = steps[0].utterances.find((u) => u.speaker === 'product')
-    expect(product?.text).toMatch(/who does that help/i)
+    expect(product?.text).toMatch(/measured change/i)
   })
 
   it('truncates the interrupted agent mid-sentence', () => {

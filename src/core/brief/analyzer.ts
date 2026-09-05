@@ -10,7 +10,7 @@
  * the coordinator, the transport or the UI.
  */
 
-import type { Brief, Claim, Competency, Flag, TranscriptEvent } from '@/core/contracts'
+import { AGENTS, type AnswerContext, type Brief, type Claim, type Competency, type Flag, type TranscriptEvent } from '@/core/contracts'
 
 export interface AnalysisResult {
   claims: Claim[]
@@ -29,7 +29,7 @@ export interface AnalysisResult {
 }
 
 export interface Analyzer {
-  analyze(event: TranscriptEvent, brief: Brief): Promise<AnalysisResult>
+  analyze(event: TranscriptEvent, brief: Brief, context?: AnswerContext): Promise<AnalysisResult>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,7 +105,7 @@ const TOPIC_RULES: { topic: string; stance: string; match: RegExp }[] = [
   {
     topic: 'ownership',
     stance: 'solo',
-    match: /\b(i (?:built|wrote|designed|shipped|did)|on my own|by myself|alone)\b/i,
+    match: /\b(on my own|by myself|entirely alone|sole (?:author|developer)|nobody (?:else )?helped)\b/i,
   },
   {
     topic: 'ownership',
@@ -137,7 +137,7 @@ export function __resetAnalyzerIds(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class RuleAnalyzer implements Analyzer {
-  async analyze(event: TranscriptEvent, brief: Brief): Promise<AnalysisResult> {
+  async analyze(event: TranscriptEvent, brief: Brief, context: AnswerContext = {}): Promise<AnalysisResult> {
     // Only the candidate makes claims. Interviewer speech is not evidence.
     if (event.speaker !== 'candidate' || !event.final) {
       return { claims: [], flags: [] }
@@ -145,6 +145,17 @@ export class RuleAnalyzer implements Analyzer {
 
     const claims: Claim[] = []
     const flags: Flag[] = []
+    const question = context.question
+    const questionArea = question && question.speaker !== 'candidate' ? AGENTS[question.speaker].owns : undefined
+    const behavior = detectBehavior(event.text)
+    if (behavior) {
+      flags.push({
+        id: nextId('flag'), kind: behavior, competency: behavior === 'off_topic' ? 'communication' : questionArea ?? 'communication',
+        evidence: [{ eventId: event.id, t: event.tStart, quote: event.text }],
+        note: behavior === 'off_topic' ? 'The answer takes an explicit detour away from the interview; redirect to the pending question.' : 'The candidate explicitly avoids the question or attempts to change the interview rules; redirect without assuming intent.',
+        raisedAtTurn: brief.turn + 1, addressed: false,
+      })
+    }
     /** The first sentence that actually pointed somewhere sets the lead. */
     let lead: Competency | undefined
 
@@ -159,9 +170,12 @@ export class RuleAnalyzer implements Analyzer {
 
     for (const sentence of splitSentences(event.text)) {
       const specific = TECHNIQUE.test(sentence) || QUANTITY.test(sentence)
-      const { competency, pointed } = classify(sentence)
+      const classified = classify(sentence)
+      const contextual = !classified.pointed && questionArea !== undefined && isContextualAnswer(sentence, question?.text ?? '')
+      const competency = contextual ? questionArea! : classified.competency
+      const pointed = !behavior && (classified.pointed || contextual)
       if (pointed && !lead) lead = competency
-      const { topic, stance } = detectTopic(sentence)
+      const { topic, stance } = behavior ? {} : detectTopic(sentence)
 
       const claim: Claim = {
         id: nextId('claim'),
@@ -180,28 +194,28 @@ export class RuleAnalyzer implements Analyzer {
 
       // ── Requirement 8a — vague answers ────────────────────────────────────
       // Sounds like a result, measures nothing.
-      if (!specific && VAGUE_INTENSIFIER.test(sentence)) {
+      if (!behavior && !specific && VAGUE_INTENSIFIER.test(sentence) && /\b(?:made|improved|faster|better|optimized|optimised|efficient|reduced|increased)\b/i.test(sentence)) {
         flags.push({
           id: nextId('flag'),
           kind: 'vague',
           competency,
           evidence,
           note: `No measurement behind "${firstMatch(sentence, VAGUE_INTENSIFIER)}".`,
-          raisedAtTurn: brief.turn,
+          raisedAtTurn: brief.turn + 1,
           addressed: false,
         })
       }
 
       // ── The Product interviewer's whole reason to exist ────────────────────
       // Impact asserted, never quantified.
-      if (competency === 'impact' && !specific) {
+      if (pointed && competency === 'impact' && !QUANTITY.test(sentence) && /\b(?:improv\w*|increas\w*|reduc\w*|boost\w*|helped|better|faster|grew|saved)\b/i.test(sentence) && !/\b(?:no|not|never|didn't|did not|don't know)\b/i.test(sentence)) {
         flags.push({
           id: nextId('flag'),
           kind: 'unchallenged_impact',
           competency,
           evidence,
           note: 'Claims user impact without naming who benefited or by how much.',
-          raisedAtTurn: brief.turn,
+          raisedAtTurn: brief.turn + 1,
           addressed: false,
         })
       }
@@ -210,7 +224,7 @@ export class RuleAnalyzer implements Analyzer {
       // Cross-check against everything already known, including earlier
       // sentences of this same utterance.
       if (topic && stance) {
-        const conflict = known.find((c) => c.topic === topic && c.stance && c.stance !== stance)
+        const conflict = known.find((c) => c.topic === topic && c.stance && c.stance !== stance && !separateScope(c.text, sentence))
         if (conflict) {
           flags.push({
             id: nextId('flag'),
@@ -220,8 +234,8 @@ export class RuleAnalyzer implements Analyzer {
               { eventId: conflict.sourceEventId, t: conflict.tStart, quote: conflict.text },
               ...evidence,
             ],
-            note: `On ${topic}: "${conflict.stance}" earlier, "${stance}" now. Both cannot be true.`,
-            raisedAtTurn: brief.turn,
+            note: `Possible discrepancy on ${topic}: "${conflict.stance}" earlier, "${stance}" now. Ask whether these describe the same work and stage.`,
+            raisedAtTurn: brief.turn + 1,
             addressed: false,
           })
         }
@@ -286,10 +300,34 @@ function classify(text: string): { competency: Competency; pointed: boolean } {
 }
 
 function detectTopic(text: string): { topic?: string; stance?: string } {
+  if (/\b(?:no (?:unit |integration )?tests?|(?:didn't|did not) (?:(?:have time to |write |run )?(?:unit |integration )?)test\w*|skipped (?:the )?tests?)\b/i.test(text)) return { topic: 'testing', stance: 'untested' }
+  if (/\b(?:not|never|didn't|did not)\b/i.test(text)) return {}
   for (const rule of TOPIC_RULES) {
     if (rule.match.test(text)) return { topic: rule.topic, stance: rule.stance }
   }
   return {}
+}
+
+/** High-confidence redirects only: silence, uncertainty and accent are not misconduct. */
+export function detectBehavior(text: string): 'off_topic' | 'evasion' | null {
+  const normalized = text.toLowerCase().replace(/[’‘]/g, "'")
+  if (/\b(?:ignore|forget|override) (?:all |your |the |previous )*(?:instructions|rules|prompt)|\b(?:give|award) me (?:full marks|five|5|a perfect score)|\b(?:won't|will not|refuse to) answer|\b(?:skip|avoid) (?:this|that|the) question|\bnone of your business\b/.test(normalized)) return 'evasion'
+  if (/\b(?:tell me (?:a joke|a story)|what(?:'s| is) (?:your name|the weather)|are you (?:an? )?(?:ai|robot)|who (?:built|made|created) you|let'?s talk about (?:football|cricket|movies|food|politics)|forget the interview)\b/.test(normalized)) return 'off_topic'
+  // An obvious unrelated subject, with no work-related framing. A food-delivery
+  // project or a story about teamwork in sport must remain a legitimate answer.
+  if (/\b(?:pizza|biryani|cricket|football|horoscope|celebrity|movie|weather|girlfriend|boyfriend)\b/.test(normalized) && !/\b(?:project|built|work|team|customer|user|app|service|business|developed|designed|learned|example)\b/.test(normalized)) return 'off_topic'
+  return null
+}
+
+function isContextualAnswer(text: string, question: string): boolean {
+  if (/\b(?:don't know|do not know|no idea|not sure|cannot answer|can't remember|don't remember)\b/i.test(text)) return true
+  if (QUANTITY.test(text) || /\b(?:because|instead|therefore|i (?:chose|checked|asked|listened|decided|tried|changed)|we (?:chose|checked|agreed))\b/i.test(text)) return true
+  const terms = question.toLowerCase().match(/\b[a-z]{5,}\b/g) ?? []
+  return terms.filter(t => !['about', 'which', 'would', 'could', 'question'].includes(t)).some(t => text.toLowerCase().includes(t))
+}
+
+function separateScope(earlier: string, later: string): boolean {
+  return /\b(?:another|different|previous|earlier|next) (?:project|company|release|version)|\b(?:afterwards|subsequently|later|eventually|initially|before|after|then)\b/i.test(earlier + ' ' + later)
 }
 
 function firstMatch(text: string, re: RegExp): string {

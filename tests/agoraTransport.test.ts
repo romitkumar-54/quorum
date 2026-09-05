@@ -71,14 +71,26 @@ describe('reading back what an agent said', () => {
     expect(said[0]).toEqual({ turnId: 3, text: 'And then what?', startMs: 4200 })
   })
 
-  it('returns nothing rather than throwing when the route has no history', async () => {
+  it('surfaces a failed history request rather than pretending the model is silent', async () => {
     route({ ok: false, error: 'Agent technical has not joined.' })
 
-    await expect(new AgoraTransport().history('technical')).resolves.toEqual([])
+    await expect(new AgoraTransport().history('technical')).rejects.toThrow('has not joined')
   })
 })
 
 describe('the calls the coordinator’s decisions turn into', () => {
+  it('keeps cleanup retryable if the service fails to release an agent', async () => {
+    const transport = new AgoraTransport()
+    route({ok: true, sessionHandle: 'signed-session'})
+    await transport.join({channelName: 'interview-test', mode: 'coordinated', remoteRtcUids: ['1099']}, [{agentId: 'technical', remoteRtcUids: ['1099'], systemPrompt: 'test'}])
+    route({ok: false, error: 'Could not close an interviewer'})
+    await expect(transport.leave()).rejects.toThrow('Could not close')
+    expect(transport.status().connected).toBe(true)
+    expect(transport.leavePayload().sessionHandle).toBe('signed-session')
+    route({ok: true})
+    await transport.leave()
+    expect(transport.status().connected).toBe(false)
+  })
   it('surfaces refused speech instead of claiming it was spoken', async () => {
     route({ok: false, error: 'Agent has stopped'})
     await expect(new AgoraTransport().speak('technical', 'A question')).rejects.toThrow('Agent has stopped')

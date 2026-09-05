@@ -13,6 +13,8 @@
  */
 
 import {
+  AGENT_IDS,
+  AGENTS,
   type AgentId,
   type Brief,
   type ChannelMode,
@@ -30,8 +32,11 @@ import { ScriptedGenerator, type QuestionGenerator } from '@/agents'
 import type { FloorPicker } from '@/agents/floor'
 import type { Transport, TransportUtterance } from '@/transport/types'
 import type { Assessment } from '@/core/brief'
+import { turnContext } from '@/agents/context'
+import { completionReason, coverage, type EndReason } from '@/core/interviewPolicy'
 
 export interface SessionStep {
+  endReason?: EndReason
   /** Absent on the opening turn, where the panel speaks before the candidate does. */
   candidateEvent?: TranscriptEvent
   brief: Brief
@@ -133,11 +138,18 @@ export class InterviewSession {
    */
   private consumed = new Map<AgentId, number>()
   private cancelled = false
+  private ended: EndReason | null = null
+
+  get endReason(): EndReason | null { return this.ended }
+
+  currentQuestion(): TranscriptEvent | undefined {
+    return [...this.transcript.all()].reverse().find(e => e.speaker !== 'candidate' && !/^(?:That takes us away|Let us return)/.test(e.text))
+  }
 
   cancel(): void { this.cancelled = true }
 
   private assertActive(): void {
-    if (this.cancelled) throw new Error('Interview ended.')
+    if (this.cancelled || this.ended) throw new Error('Interview ended.')
   }
 
   constructor(private options: SessionOptions = {}) {
@@ -203,10 +215,23 @@ export class InterviewSession {
 
   async candidateSays(text: string, at?: number): Promise<SessionStep> {
     this.assertActive()
+    if (!text.trim()) throw new Error('Please provide an answer.')
+    const question = this.currentQuestion()
     const candidateEvent = this.transcript.append({ speaker: 'candidate', text, tStart: at })
     this.options.onTranscript?.()
-    const { brief, lead } = await this.brief.ingest(candidateEvent)
+    if (/^(?:please )?(?:end|stop|finish) (?:the |this |my )?interview[.!]?$/i.test(text.trim())) {
+      this.ended = 'candidate'
+      this.coordinator.release()
+      return { candidateEvent, brief: this.brief.current(), decisions: [], utterances: [], endReason: this.ended }
+    }
+    const { brief, lead } = await this.brief.ingest(candidateEvent, { question })
     this.assertActive()
+    this.options.onTranscript?.()
+    this.ended = completionReason(brief)
+    if (this.ended) {
+      this.coordinator.release()
+      return { candidateEvent, brief, decisions: [], utterances: [], endReason: this.ended }
+    }
 
     // The analyst names the lead, rather than this reading it off the first
     // claim. The difference is that the analyst is allowed to name nobody: a
@@ -218,13 +243,18 @@ export class InterviewSession {
     const utterances: TranscriptEvent[] = []
 
     // The model nominates; the coordinator decides whether that is allowed.
+    const counts = coverage(brief)
+    const leastCovered = [...AGENT_IDS].sort((a, b) => counts[AGENTS[a].owns] - counts[AGENTS[b].owns])[0]
+    const redirect = brief.flags.find(f => !f.addressed && f.evidence.some(e => e.eventId === candidateEvent.id) && (f.kind === 'off_topic' || f.kind === 'evasion'))
     const nomination = this.floor
       ? await this.floor.pick({
           brief,
           transcript: this.transcript.all(),
           recentSpeakers: this.recentSpeakers(),
         })
-      : null
+      : redirect ? { agent: AGENT_IDS.find(id => AGENTS[id].owns === redirect.competency)!, reason: 'Bring the answer back to the pending interview question.' }
+      : brief.turn >= 3 && Math.max(...Object.values(counts)) > counts[AGENTS[leastCovered].owns]
+        ? { agent: leastCovered, reason: 'Gather evidence in an area the panel has not covered enough.' } : null
 
     const grant = this.coordinator.openFloor(
       {
@@ -259,8 +289,15 @@ export class InterviewSession {
       return { candidateEvent, brief: this.brief.current(), decisions, utterances }
     }
 
-    const holder = await this.take(grant.grantedTo, grant, grant.tDecision, this.coordinator.justification(), text)
+    const holder = await this.take(grant.grantedTo, grant, grant.tDecision, this.coordinator.justification())
     utterances.push(holder)
+
+    // A live line has already finished by this point. A retrospective interrupt
+    // would ask two questions before the candidate can answer and invent overlap.
+    if (this.transport?.generatesOwnLines) {
+      this.coordinator.release()
+      return { candidateEvent, brief: this.brief.current(), decisions, utterances }
+    }
 
     // ── Mid-turn: has somebody else got grounds to cut in? ───────────────────
     const tRecheck = grant.tDecision + this.holdBeforeRecheck()
@@ -283,7 +320,6 @@ export class InterviewSession {
           interrupt,
           tRecheck,
           this.coordinator.justification(),
-          text,
           true,
         ),
       )
@@ -333,6 +369,8 @@ export class InterviewSession {
     this.coordinator.reset(mode)
     this.yielded.clear()
     this.consumed.clear()
+    this.cancelled = false
+    this.ended = null
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -350,9 +388,7 @@ export class InterviewSession {
     opening = false,
   ): Promise<string> {
     const justifiedBy = this.flagsById(flagIds)
-    if (addressFlags) this.brief.markAddressed(justifiedBy.map((f) => f.id))
-
-    return this.generator.next({
+    const line = await this.generator.next({
       agent,
       brief: this.brief.current(),
       decision,
@@ -360,6 +396,8 @@ export class InterviewSession {
       transcript: this.transcript.all(),
       opening,
     })
+    if (addressFlags) this.brief.markAddressed(justifiedBy.slice(0, 1).map((f) => f.id))
+    return line
   }
 
   /**
@@ -379,7 +417,6 @@ export class InterviewSession {
     decision: FloorDecision,
     at: number,
     flagIds: string[],
-    candidateText: string,
     cuttingIn = false,
   ): Promise<TranscriptEvent> {
     const transport = this.transport
@@ -390,7 +427,6 @@ export class InterviewSession {
     // Marking the flags addressed belongs to the composer in the other branch.
     // It still has to happen here, or two agents challenge the same thing.
     const justifiedBy = this.flagsById(flagIds)
-    this.brief.markAddressed(justifiedBy.map((f) => f.id))
 
     // Whoever was holding the floor stops mid-sentence before the next one
     // starts. This is the yield half of the interrupt.
@@ -399,7 +435,16 @@ export class InterviewSession {
     this.assertActive()
     const before = (await transport.history?.(agent)) ?? []
     this.assertActive()
-    await transport.think(agent, candidateText)
+    const redirect = justifiedBy.find(f => f.kind === 'off_topic' || f.kind === 'evasion')
+    if (redirect) {
+      const text = await this.compose(agent, decision, [redirect.id], false)
+      await transport.interrupt()
+      await this.sayAndWait(transport, agent, text)
+      const event = this.append(agent, text, at)
+      this.brief.markAddressed([redirect.id], this.currentQuestion()?.id ?? event.id)
+      return event
+    }
+    await transport.think(agent, turnContext(agent, this.brief.current(), this.transcript.all(), justifiedBy.slice(0, 1)))
     const line = await this.awaitLine(transport, agent, before)
 
     this.assertActive()
@@ -407,6 +452,7 @@ export class InterviewSession {
       const event = this.append(agent, line.text, at)
       await this.options.waitForAudio?.(agent, line.text)
       this.assertActive()
+      this.brief.markAddressed(justifiedBy.slice(0, 1).map(f => f.id), event.id)
       return event
     }
 
@@ -418,7 +464,9 @@ export class InterviewSession {
     this.assertActive()
     await transport.interrupt()
     await this.sayAndWait(transport, agent, fallback)
-    return this.append(agent, fallback, at)
+    const event = this.append(agent, fallback, at)
+    this.brief.markAddressed(justifiedBy.slice(0, 1).map(f => f.id), event.id)
+    return event
   }
 
   /**
@@ -527,13 +575,13 @@ export class InterviewSession {
       if (Date.now() - started >= this.healthCheckAfterMs) {
         const state = await transport.agentState?.(agent)
         if (state && /fail|stop|exit|error/i.test(state)) {
-          this.onNotice?.(`The ${agent} interviewer dropped out of the channel (${state}). The panel is covering.`)
+          this.onNotice?.(`The ${agent} interviewer dropped out of the channel (${state}). Using a preset fallback question for this turn.`)
           return null
         }
       }
     }
 
-    this.onNotice?.(`The ${agent} interviewer did not answer in time. The panel is covering.`)
+    this.onNotice?.(`The ${agent} interviewer did not answer in time. Using a preset fallback question for this turn.`)
     return null
   }
 
@@ -557,7 +605,9 @@ export class InterviewSession {
     flagIds: string[],
     addressFlags = true,
   ): Promise<TranscriptEvent> {
-    return this.append(agent, await this.compose(agent, decision, flagIds, addressFlags), at)
+    const event = this.append(agent, await this.compose(agent, decision, flagIds, false), at)
+    if (addressFlags) this.brief.markAddressed(flagIds.slice(0, 1), /^(?:That takes us away|Let us return)/.test(event.text) ? this.currentQuestion()?.id ?? event.id : event.id)
+    return event
   }
 
   /**

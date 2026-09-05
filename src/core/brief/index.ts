@@ -11,6 +11,8 @@ import {
   COMPETENCIES,
   EMPTY_BRIEF,
   type AgentId,
+  type AnswerContext,
+  type AnswerRecord,
   type Brief,
   type Claim,
   type Competency,
@@ -45,15 +47,34 @@ export class BriefBuilder {
    */
   async ingest(
     event: TranscriptEvent,
+    context: AnswerContext = {},
   ): Promise<{ brief: Brief; newClaims: Claim[]; newFlags: Flag[]; lead?: Competency }> {
-    const { claims, flags, lead } = await this.analyzer.analyze(event, this.brief)
+    if (event.speaker !== 'candidate' || !event.final || !event.text.trim() || this.brief.answers?.some(a => a.event.id === event.id)) {
+      return { brief: this.brief, newClaims: [], newFlags: [] }
+    }
+    if (context.question && /^(?:please )?(?:(?:can|could|would) you )?(?:repeat|rephrase|clarify|explain)(?: that| the question| your question| what you mean)[?.! ]*$/i.test(event.text.trim())) {
+      return { brief: this.brief, newClaims: [], newFlags: [] }
+    }
+    const { claims, flags, lead } = await this.analyzer.analyze(event, this.brief, context)
+    const questionArea = context.question && context.question.speaker !== 'candidate' ? AGENTS[context.question.speaker].owns : undefined
+    const disposition: AnswerRecord['disposition'] = flags.some(f => f.kind === 'evasion') ? 'evasion'
+      : flags.some(f => f.kind === 'off_topic') ? 'off_topic'
+      : claims.some(c => c.relevant !== false) ? 'answer' : 'unknown'
 
     const next: Brief = {
       turn: event.speaker === 'candidate' ? this.brief.turn + 1 : this.brief.turn,
       claims: [...this.brief.claims, ...claims],
-      flags: [...this.brief.flags, ...flags],
+      flags: [...this.brief.flags.map(flag => {
+        if (!flag.questionEventId || flag.questionEventId !== context.question?.id || disposition !== 'answer') return flag
+        const concrete = claims.some(c => c.relevant !== false && c.specific)
+        const clarified = flag.kind === 'off_topic' || flag.kind === 'evasion' || (flag.kind === 'vague' && concrete)
+          || (flag.kind === 'unchallenged_impact' && /\d+(?:\.\d+)?\s*(?:%|percent|users?|ms|seconds?|revenue)/i.test(event.text))
+          || (flag.kind === 'contradiction' && /\b(?:earlier|later|different|another|stage|meant|correction|misspoke|to clarify)\b/i.test(event.text))
+        return clarified ? { ...flag, resolvedBy: { eventId: event.id, t: event.tStart, quote: event.text } } : flag
+      }), ...flags],
       difficulty: this.brief.difficulty,
       scores: this.brief.scores,
+      answers: [...(this.brief.answers ?? []), { event, question: context.question, competency: questionArea ?? lead, disposition }],
     }
 
     // ── Requirement 7 — difficulty adjustment ────────────────────────────────
@@ -65,7 +86,7 @@ export class BriefBuilder {
     // back down. A contradiction is a consistency problem, not a level problem,
     // so it leaves difficulty alone.
     if (claims.length > 0) {
-      const wasConcrete = claims.some((c) => c.specific)
+      const wasConcrete = claims.some((c) => c.specific && c.relevant !== false)
       const wasHandWavy = flags.some((f) => f.kind === 'vague')
       if (wasConcrete) next.difficulty = clamp(next.difficulty + 1, DIFFICULTY_MIN, DIFFICULTY_MAX)
       else if (wasHandWavy) next.difficulty = clamp(next.difficulty - 1, DIFFICULTY_MIN, DIFFICULTY_MAX)
@@ -77,12 +98,12 @@ export class BriefBuilder {
   }
 
   /** Mark a flag as challenged on the floor, so nobody raises it twice. */
-  markAddressed(flagIds: string[]): Brief {
+  markAddressed(flagIds: string[], questionEventId?: string): Brief {
     if (flagIds.length === 0) return this.brief
     const ids = new Set(flagIds)
     this.brief = {
       ...this.brief,
-      flags: this.brief.flags.map((f) => (ids.has(f.id) ? { ...f, addressed: true } : f)),
+      flags: this.brief.flags.map((f) => (ids.has(f.id) ? { ...f, addressed: true, questionEventId: questionEventId ?? f.questionEventId } : f)),
     }
     return this.brief
   }
@@ -110,13 +131,23 @@ function score(brief: Brief): Record<Competency, number> {
 
   for (const competency of COMPETENCIES) {
     const claims = relevantClaims(brief, competency)
-    if (!claims.length) { out[competency] = 0; continue }
     // Score answers, not keyword counts. Repeating a technique or breaking an
     // answer into many sentences cannot accumulate points.
     const answers = new Map<string, string[]>()
     for (const claim of claims) answers.set(claim.sourceEventId, [...(answers.get(claim.sourceEventId) ?? []), claim.text])
+    // Answering around a question supplies no evidence for that question.
+    // The question determines the area only; none of its words enter the rubric.
+    const unanswered = new Set<string>()
+    for (const answer of brief.answers ?? []) {
+      if (answer.competency !== competency) continue
+      if (answer.disposition !== 'answer') {
+        answers.set(answer.event.id, [answer.event.text])
+        unanswered.add(answer.event.text.toLowerCase())
+      }
+    }
+    if (!answers.size) { out[competency] = 0; continue }
     const unique = [...new Set([...answers.values()].map(parts => parts.join(' ').toLowerCase()))]
-    const values = unique.map(text => rubric(competency, text))
+    const values = unique.map(text => unanswered.has(text) ? 1 : rubric(competency, text))
     out[competency] = clamp(Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10, SCORE_MIN, SCORE_MAX)
   }
 
@@ -129,7 +160,9 @@ function relevantClaims(brief: Brief, competency: Competency): Claim[] {
 
 /** An explicit evidence rubric, not a judgement of correctness or hiring fitness. */
 function rubric(competency: Competency, text: string): number {
-  if (/\b(?:don't know|do not know|no idea|cannot answer)\b/.test(text)) return 1
+  text = text.replace(/[’‘]/g, "'")
+  if (/\b(?:don't know|do not know|no idea|cannot answer|can't remember|don't remember)\b/.test(text)) return 1
+  if (text.trim().split(/\s+/).length < 5) return 1
   const reasoning = /\b(?:because|therefore|so that|trade.?off|instead|whereas|compared|however|to avoid|so )\b/.test(text)
   const measured = /\d+(?:\.\d+)?\s*(?:%|percent|ms|seconds?|users?|requests?|revenue|dollars?)/.test(text)
   const detail = text.split(/\s+/).length >= 18
@@ -157,6 +190,8 @@ export interface AgentVerdict {
   score: number | null
   verdict: string
   evidence: Evidence[]
+  answersReviewed: number
+  gaps: string[]
 }
 
 export interface Assessment {
@@ -179,9 +214,11 @@ export function assess(brief: Brief): Assessment {
     return {
       agent: id,
       competency,
-      score: relevantClaims(brief, competency).length ? brief.scores[competency] : null,
+      score: hasEvidence(brief, competency) ? brief.scores[competency] : null,
       verdict: verdictFor(competency, brief),
       evidence: evidenceFor(competency, brief),
+      answersReviewed: new Set([...relevantClaims(brief, competency).map(c => c.sourceEventId), ...(brief.answers ?? []).filter(a => a.competency === competency).map(a => a.event.id)]).size,
+      gaps: gapsFor(competency, brief),
     }
   })
 
@@ -195,15 +232,15 @@ export function assess(brief: Brief): Assessment {
     final,
     split,
     spread,
-    openFlags: brief.flags.filter((f) => !f.addressed),
-    summary: `Provisional evidence review of ${brief.turn} answer${brief.turn === 1 ? '' : 's'}; ${values.length} of 3 areas assessed. Scores reflect specificity, reasoning and supporting detail in your answers. This rules-based rubric does not verify technical correctness. ${values.length < 3 ? 'More evidence is needed before an overall score can be reported.' : split ? `Evidence scores differ by ${spread} points across areas.` : 'Review the supporting quotes and gaps below.'}`,
+    openFlags: brief.flags.filter((f) => !f.resolvedBy),
+    summary: `Provisional evidence review of ${brief.turn} answer${brief.turn === 1 ? '' : 's'}; ${values.length} of 3 areas assessed. Only candidate answers affect scores; interviewer questions supply context, never credit. Scores reflect specificity, reasoning and supporting detail. This rules-based rubric does not verify technical correctness. ${values.length < 3 ? 'More evidence is needed before an overall score can be reported.' : split ? `Evidence scores differ by ${spread} points across areas.` : 'Review the supporting quotes and gaps below.'}`,
   }
 }
 
 function verdictFor(competency: Competency, brief: Brief): string {
   const claims = relevantClaims(brief, competency)
-  if (!claims.length) return 'Not assessed — no relevant answer captured.'
-  const count = new Set(claims.map(c => c.sourceEventId)).size
+  if (!hasEvidence(brief, competency)) return 'Not assessed — no relevant answer captured.'
+  const count = new Set([...claims.map(c => c.sourceEventId), ...(brief.answers ?? []).filter(a => a.competency === competency).map(a => a.event.id)]).size
   const guidance = {
     algorithms: 'Explain the approach, trade-offs, and how you tested it. Naming a technique alone does not establish correctness.',
     impact: 'Identify who benefited, give a before/after measurement, and explain how you attributed the result.',
@@ -227,14 +264,33 @@ function evidenceFor(competency: Competency, brief: Brief): Evidence[] {
   const fromFlags = brief.flags
     .filter((f) => relevantFlags[competency].includes(f.kind))
     .flatMap((f) => f.evidence)
+  const fromAnswers = (brief.answers ?? []).filter(a => a.competency === competency)
+    .map(a => ({ eventId: a.event.id, t: a.event.tStart, quote: a.event.text }))
 
   // De-duplicate by the event each piece of evidence points at.
   const seen = new Set<string>()
-  return [...fromClaims, ...fromFlags].filter((e) => {
+  return [...fromAnswers, ...fromClaims, ...fromFlags].filter((e) => {
     if (seen.has(e.eventId)) return false
     seen.add(e.eventId)
     return true
   })
+}
+
+function hasEvidence(brief: Brief, competency: Competency): boolean {
+  return relevantClaims(brief, competency).length > 0 || (brief.answers ?? []).some(a => a.competency === competency)
+}
+
+function gapsFor(competency: Competency, brief: Brief): string[] {
+  const text = relevantClaims(brief, competency).map(c => c.text).join(' ').toLowerCase()
+  if (!hasEvidence(brief, competency)) return ['This area was not answered; no score has been invented.']
+  const gaps: string[] = []
+  if (!/\b(?:because|instead|trade.?off|so that|therefore)\b/.test(text)) gaps.push('Explain why you chose your approach.')
+  if (competency === 'algorithms' && !/\b(?:test\w*|benchmark\w*|measur\w*|edge case)\b/.test(text)) gaps.push('Describe how you checked the result and handled failure cases.')
+  if (competency === 'impact' && !/\d/.test(text)) gaps.push('Give a measured outcome and a baseline, or state what was not measured.')
+  if (competency === 'communication' && !/\b(?:learned|learnt|feedback|next time|resolved)\b/.test(text)) gaps.push('Explain the outcome and what you learned.')
+  const skipped = (brief.answers ?? []).filter(a => a.competency === competency && a.disposition !== 'answer').length
+  if (skipped) gaps.push(`${skipped} response${skipped === 1 ? '' : 's'} did not supply relevant evidence for the question asked.`)
+  return gaps
 }
 
 function clamp(n: number, min: number, max: number): number {
