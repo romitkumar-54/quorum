@@ -1,26 +1,795 @@
-@import "tailwindcss";
+@import 'tailwindcss';
+
+/*
+  QUORUM — a gallery for a conversation.
+
+  The interface is a broadcast control gallery. One source is on air at a time;
+  the coordinator is the mixer that decides which. That is not decoration — it
+  is the most literal possible picture of what the software does.
+
+  Colour rule, held to strictly: saturated colour means floor state and nothing
+  else. Red is on air. Amber is bidding for the floor. Everything else is grey.
+  So in naive mode, three lamps going red at once reads as a fault, because it
+  is one.
+*/
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Cool blue-grey, the colour of a gallery with the lights down. */
+  --gallery: #14181c;
+  --desk: #1b2127;
+  --desk-raised: #222a31;
+  --edge: #2c353d;
+  --edge-bright: #3d4952;
+
+  --read: #e6ebef;
+  --read-dim: #9aa7b2;
+  --read-faint: #6b7883;
+
+  /* State, never decoration. */
+  --air: #ff3b30;
+  --air-glow: #ff3b3033;
+  --bid: #ffb020;
+  --idle: #3d4952;
+
+  /* The one non-state hue: things traced back to the transcript. */
+  --evidence: #57c2a8;
+
+  --font-ui: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --font-code: var(--font-plex), ui-monospace, monospace;
+
+  --rule: 1px solid var(--edge);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+* {
+  box-sizing: border-box;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--gallery);
+  color: var(--read);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--bid);
+  outline-offset: 2px;
+}
+
+/* ── Shell ─────────────────────────────────────────────────────────────── */
+
+.shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: var(--rule);
+  flex-wrap: wrap;
+}
+
+.wordmark {
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
+
+.strip-meta {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--read-dim);
+}
+
+.strip-spacer {
+  flex: 1;
+}
+
+/* The AI disclosure. A stated requirement, and it stays on screen throughout. */
+.disclosure {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 11px;
+  border: 1px solid var(--edge-bright);
+  border-radius: 2px;
+  font-size: 12.5px;
+  color: var(--read-dim);
+}
+
+.disclosure-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--evidence);
+}
+
+/* ── The rack of interviewers ──────────────────────────────────────────── */
+
+.rack {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--edge);
+  border-bottom: var(--rule);
+}
+
+.source {
+  background: var(--desk);
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 190px;
+  position: relative;
+}
+
+.source[data-state='air'] {
+  background: linear-gradient(180deg, var(--air-glow) 0%, transparent 55%), var(--desk-raised);
+}
+
+.source-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.source-name {
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.source-role {
+  font-size: 12.5px;
+  color: var(--read-faint);
+  line-height: 1.4;
+}
+
+/* The tally lamp. Reproduces gallery signage, so it is set the way signage is. */
+.tally {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-code);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--read-faint);
+  white-space: nowrap;
+}
+
+.lamp {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--idle);
+  transition: background 120ms linear, box-shadow 120ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lamp {
+    transition: none;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+[data-state='air'] .lamp {
+  background: var(--air);
+  box-shadow: 0 0 0 3px var(--air-glow);
+}
+
+[data-state='air'] .tally {
+  color: var(--air);
+}
+
+[data-state='bid'] .lamp {
+  background: var(--bid);
+}
+
+[data-state='bid'] .tally {
+  color: var(--bid);
+}
+
+.source-line {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--read);
+  flex: 1;
+}
+
+.source-line[data-empty='true'] {
+  color: var(--read-faint);
+}
+
+/* The bid readout: what this agent asked for, and what it scored. */
+.bid-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--edge);
+  padding-top: 9px;
+  font-size: 12px;
+  color: var(--read-faint);
+}
+
+.bid-score {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--read-dim);
+  min-width: 34px;
+}
+
+.bid-bar {
+  flex: 1;
+  height: 3px;
+  background: var(--edge);
+  position: relative;
+  overflow: hidden;
+}
+
+.bid-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--edge-bright);
+}
+
+[data-state='air'] .bid-bar span {
+  background: var(--air);
+}
+
+[data-state='bid'] .bid-bar span {
+  background: var(--bid);
+}
+
+.cut-in {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  font-family: var(--font-code);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--air);
+  border: 1px solid var(--air);
+  padding: 2px 6px;
+}
+
+/* ── The floor: why this agent is speaking ─────────────────────────────── */
+
+.floor {
+  padding: 14px 20px;
+  border-bottom: var(--rule);
+  display: flex;
+  gap: 14px;
+  align-items: baseline;
+  background: var(--desk);
+}
+
+.floor-label {
+  font-family: var(--font-code);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--read-faint);
+  white-space: nowrap;
+}
+
+.floor-reason {
+  font-size: 15px;
+  color: var(--read);
+}
+
+.floor[data-kind='collision'] .floor-reason {
+  color: var(--air);
+}
+
+/* ── Two columns: transcript and brief ─────────────────────────────────── */
+
+.columns {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 1px;
+  background: var(--edge);
+  flex: 1;
+  min-height: 0;
+}
+
+.column {
+  background: var(--gallery);
+  padding: 16px 20px 22px;
+  min-width: 0;
+  overflow-y: auto;
+  max-height: 46vh;
+}
+
+.column-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  position: sticky;
+  top: -16px;
+  background: var(--gallery);
+  padding: 4px 0 8px;
+  z-index: 1;
+}
+
+.column-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.column-note {
+  font-family: var(--font-code);
+  font-size: 11.5px;
+  color: var(--read-faint);
+}
+
+/* Transcript */
+
+.turn {
+  display: grid;
+  grid-template-columns: 46px 1fr;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--edge);
+}
+
+.turn-time {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--read-faint);
+  padding-top: 2px;
+}
+
+.turn-who {
+  font-size: 12.5px;
+  color: var(--read-dim);
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.turn-text {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.turn[data-speaker='candidate'] .turn-text {
+  color: var(--read);
+}
+
+.turn:not([data-speaker='candidate']) .turn-text {
+  color: var(--read-dim);
+}
+
+.turn-badge {
+  font-family: var(--font-code);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--air);
+  border: 1px solid var(--air);
+  padding: 0 4px;
+}
+
+/* Brief */
+
+.brief-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 1px;
+  background: var(--edge);
+  border: var(--rule);
+  margin-bottom: 14px;
+}
+
+.stat {
+  background: var(--desk);
+  padding: 9px 12px;
+}
+
+.stat-label {
+  font-size: 11.5px;
+  color: var(--read-faint);
+}
+
+.stat-value {
+  font-family: var(--font-code);
+  font-size: 18px;
+  color: var(--read);
+}
+
+.difficulty {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.difficulty i {
+  width: 7px;
+  height: 12px;
+  background: var(--edge-bright);
+  display: block;
+}
+
+.difficulty i[data-on='true'] {
+  background: var(--read-dim);
+}
+
+.flag {
+  border: var(--rule);
+  border-left: 2px solid var(--bid);
+  padding: 9px 12px;
+  margin-bottom: 8px;
+  background: var(--desk);
+}
+
+.flag[data-addressed='true'] {
+  border-left-color: var(--edge-bright);
+  opacity: 0.6;
+}
+
+.flag-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.flag-kind {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--bid);
+}
+
+.flag[data-addressed='true'] .flag-kind {
+  color: var(--read-faint);
+}
+
+.flag-status {
+  font-size: 11.5px;
+  color: var(--read-faint);
+}
+
+.flag-note {
+  font-size: 13px;
+  color: var(--read-dim);
+  margin-bottom: 6px;
+}
+
+/* Evidence is the one thing that gets its own hue, because tracing a judgement
+   back to the moment it came from is the point of requirement 9. */
+.evidence {
+  display: flex;
+  gap: 9px;
+  font-size: 12.5px;
+  color: var(--read-faint);
+  padding: 2px 0;
+}
+
+.evidence-time {
+  font-family: var(--font-code);
+  color: var(--evidence);
+  flex-shrink: 0;
+}
+
+.empty {
+  color: var(--read-faint);
+  font-size: 13.5px;
+  padding: 10px 0;
+}
+
+/* ── Controls ──────────────────────────────────────────────────────────── */
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: var(--rule);
+  border-bottom: var(--rule);
+  flex-wrap: wrap;
+  background: var(--desk);
+}
+
+.btn {
+  background: var(--desk-raised);
+  border: 1px solid var(--edge-bright);
+  border-radius: 2px;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: border-color 120ms linear, background 120ms linear;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--read-faint);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn[data-primary='true'] {
+  background: var(--read);
+  color: var(--gallery);
+  border-color: var(--read);
+}
+
+.btn[data-primary='true']:hover:not(:disabled) {
+  background: #fff;
+}
+
+/* The mode switch. This is the argument, so it gets the most deliberate control. */
+.mode {
+  display: flex;
+  border: 1px solid var(--edge-bright);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.mode button {
+  background: transparent;
+  border: 0;
+  padding: 8px 13px;
+  font-size: 13.5px;
+  color: var(--read-dim);
+}
+
+.mode button[data-on='true'] {
+  background: var(--desk-raised);
+  color: var(--read);
+}
+
+.mode button[data-on='true'][data-danger='true'] {
+  background: var(--air);
+  color: #fff;
+}
+
+.field {
+  flex: 1;
+  min-width: 240px;
+  display: flex;
+  gap: 8px;
+}
+
+.field input {
+  flex: 1;
+  background: var(--gallery);
+  border: 1px solid var(--edge-bright);
+  border-radius: 2px;
+  padding: 8px 12px;
+  color: var(--read);
+  font: inherit;
+  font-size: 14px;
+}
+
+.field input::placeholder {
+  color: var(--read-faint);
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--read-faint);
+}
+
+/* ── Measurement ───────────────────────────────────────────────────────── */
+
+.meters {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1px;
+  background: var(--edge);
+  border-bottom: var(--rule);
+}
+
+.meter {
+  background: var(--desk);
+  padding: 11px 16px;
+}
+
+.meter-label {
+  font-size: 11.5px;
+  color: var(--read-faint);
+  margin-bottom: 1px;
+}
+
+.meter-value {
+  font-family: var(--font-code);
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.meter[data-alarm='true'] .meter-value {
+  color: var(--air);
+}
+
+.meter-unit {
+  font-size: 12px;
+  color: var(--read-faint);
+  margin-left: 3px;
+}
+
+/* ── Report ────────────────────────────────────────────────────────────── */
+
+.report {
+  padding: 22px 20px 40px;
+}
+
+.report-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.report h2 {
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.report-summary {
+  color: var(--read-dim);
+  font-size: 14px;
+  margin: 0 0 18px;
+}
+
+.verdicts {
+  display: grid;
+  gap: 1px;
+  background: var(--edge);
+  border: var(--rule);
+}
+
+.verdict {
+  background: var(--desk);
+  padding: 13px 16px;
+  display: grid;
+  grid-template-columns: 130px 58px 1fr;
+  gap: 14px;
+  align-items: baseline;
+}
+
+.verdict-name {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
+.verdict-competency {
+  font-size: 12px;
+  color: var(--read-faint);
+  display: block;
+  font-weight: 400;
+}
+
+.verdict-score {
+  font-family: var(--font-code);
+  font-size: 19px;
+}
+
+.verdict-text {
+  color: var(--read-dim);
+  font-size: 14px;
+}
+
+.verdict-evidence {
+  grid-column: 1 / -1;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge);
+}
+
+.final {
+  display: grid;
+  grid-template-columns: 130px 58px 1fr;
+  gap: 14px;
+  align-items: baseline;
+  padding: 14px 16px;
+  border: var(--rule);
+  border-top: 0;
+  background: var(--desk-raised);
+}
+
+.final[data-split='true'] {
+  border-left: 2px solid var(--air);
+}
+
+.final-flag {
+  color: var(--air);
+  font-size: 13.5px;
+}
+
+/* ── Requirement ledger ────────────────────────────────────────────────── */
+
+.ledger {
+  margin-top: 26px;
+}
+
+.ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1px;
+  background: var(--edge);
+  border: var(--rule);
+}
+
+.req {
+  background: var(--desk);
+  padding: 8px 12px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--read-faint);
+}
+
+.req[data-met='true'] {
+  color: var(--read);
+}
+
+.req-mark {
+  font-family: var(--font-code);
+  font-size: 12px;
+  color: var(--edge-bright);
+}
+
+.req[data-met='true'] .req-mark {
+  color: var(--evidence);
+}
+
+/* ── Narrow screens ────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+  .rack {
+    grid-template-columns: 1fr;
+  }
+
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .column {
+    max-height: none;
+  }
+
+  .meters {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .verdict,
+  .final {
+    grid-template-columns: 1fr 46px;
+  }
+
+  .verdict-text {
+    grid-column: 1 / -1;
+  }
 }
