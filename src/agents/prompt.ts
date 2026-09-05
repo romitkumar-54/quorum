@@ -22,6 +22,23 @@ export const TRANSCRIPT_WINDOW = 6
 
 export function buildMessages(input: GenerationInput): ChatMessage[] {
   const { brief, justifiedBy, transcript } = input
+  // The first line has nothing to react to, so none of the machinery below
+  // applies. It is also the one place the panel is allowed three sentences.
+  if (input.opening) {
+    return [
+      { role: 'system', content: buildSystemPrompt(input.agent) },
+      {
+        role: 'user',
+        content: [
+          'This is the first thing the candidate hears. The interview has not started yet.',
+          '',
+          'Greet them in one sentence. Make clear that this panel is AI and not human.',
+          'Then ask your opening question about their most recent piece of work.',
+          'Three sentences at the very most, and only this once.',
+        ].join('\n'),
+      },
+    ]
+  }
 
   const claims = brief.claims.length
     ? brief.claims.map((c) => `- ${c.competency}: ${c.text}`).join('\n')

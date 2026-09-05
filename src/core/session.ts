@@ -31,7 +31,8 @@ import type { FloorPicker } from '@/agents/floor'
 import type { Assessment } from '@/core/brief'
 
 export interface SessionStep {
-  candidateEvent: TranscriptEvent
+  /** Absent on the opening turn, where the panel speaks before the candidate does. */
+  candidateEvent?: TranscriptEvent
   brief: Brief
   /** In order: the grant, then an interrupt if one was justified. */
   decisions: FloorDecision[]
@@ -91,6 +92,31 @@ export class InterviewSession {
    * Drive one candidate turn all the way through the panel.
    * `at` fixes the utterance start time; otherwise the session clock is used.
    */
+
+  /**
+   * The panel opens the interview.
+   *
+   * Somebody has to speak first, and it cannot be the candidate: they are
+   * waiting to be asked. The opener greets them, discloses that the panel is
+   * not human, and asks the first question. The floor is released immediately
+   * afterwards so the candidate can answer into an empty channel.
+   */
+  async open(opener: AgentId = 'behavioural'): Promise<SessionStep> {
+    const tNow = this.decisionLatency()
+    const grant = this.coordinator.openFloor(
+      { brief: this.brief.current(), leadCompetency: undefined, tSilenceDetected: 0, tNow },
+      opener,
+      'Opening the interview.',
+    )
+
+    const speaker = grant.grantedTo ?? opener
+    const text = await this.compose(speaker, grant, [], false, true)
+    const utterance = this.append(speaker, text, tNow)
+    this.coordinator.release()
+
+    return { brief: this.brief.current(), decisions: [grant], utterances: [utterance] }
+  }
+
   async candidateSays(text: string, at?: number): Promise<SessionStep> {
     const candidateEvent = this.transcript.append({ speaker: 'candidate', text, tStart: at })
     const { brief, newClaims } = await this.brief.ingest(candidateEvent)
@@ -223,6 +249,7 @@ export class InterviewSession {
     decision: FloorDecision,
     flagIds: string[],
     addressFlags = true,
+    opening = false,
   ): Promise<string> {
     const justifiedBy = this.flagsById(flagIds)
     if (addressFlags) this.brief.markAddressed(justifiedBy.map((f) => f.id))
@@ -233,6 +260,7 @@ export class InterviewSession {
       decision,
       justifiedBy,
       transcript: this.transcript.all(),
+      opening,
     })
   }
 

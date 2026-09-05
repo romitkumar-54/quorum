@@ -17,6 +17,8 @@ export interface GenerationInput {
   decision: FloorDecision
   /** The flags this agent was granted the floor to challenge. */
   justifiedBy: Flag[]
+  /** True for the very first line, where there is nothing to react to yet. */
+  opening?: boolean
   transcript: readonly TranscriptEvent[]
 }
 

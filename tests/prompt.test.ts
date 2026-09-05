@@ -98,3 +98,22 @@ describe('the prompt carries the reason the floor was granted', () => {
     expect(recent).toContain(input.transcript[input.transcript.length - 1].text)
   })
 })
+
+describe('the opening turn', () => {
+  it('asks for a greeting instead of a follow-up', async () => {
+    const input = { ...(await inputWithFlag()), opening: true }
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+    expect(text).toMatch(/first thing the candidate hears/i)
+    expect(text).not.toContain('THEY JUST SAID')
+  })
+
+  it('has the opener disclose that the panel is not human', async () => {
+    const input = { ...(await inputWithFlag()), opening: true }
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+    expect(text).toMatch(/not human|are AI|artificial/i)
+  })
+})

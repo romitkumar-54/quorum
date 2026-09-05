@@ -119,3 +119,33 @@ describe('the model picks, the code still decides what is allowed', () => {
     expect(granted[0]).toBeTruthy()
   })
 })
+
+describe('the interview opens itself', () => {
+  it('has an interviewer greet the candidate before anything is said', async () => {
+    const session = new InterviewSession({ mode: 'coordinated', ...fixed })
+
+    const step = await session.open()
+
+    expect(step.utterances).toHaveLength(1)
+    expect(step.decisions[0].grantedTo).toBe(step.utterances[0].speaker)
+    expect(session.transcript.all()).toHaveLength(1)
+  })
+
+  it('tells the generator there is nothing to react to yet', async () => {
+    let opening: boolean | undefined
+    const session = new InterviewSession({
+      generator: { async next(input) { opening = input.opening; return 'Hello.' } },
+      ...fixed,
+    })
+
+    await session.open()
+
+    expect(opening).toBe(true)
+  })
+
+  it('leaves the floor free so the candidate can answer', async () => {
+    const session = new InterviewSession({ mode: 'coordinated', ...fixed })
+    await session.open()
+    expect(session.coordinator.holder()).toBeNull()
+  })
+})
