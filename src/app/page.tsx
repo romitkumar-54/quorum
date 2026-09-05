@@ -25,6 +25,7 @@ import { EMPTY_METRICS, type Metrics } from '@/core/metrics'
 import type { Assessment } from '@/core/brief'
 import { SimulatedTransport } from '@/transport/simulated'
 import { AgoraTransport } from '@/transport/agora'
+import { RtcChannel } from '@/transport/rtcChannel'
 import { ScriptedGenerator } from '@/agents'
 import { chooseBrain, type Brain } from '@/agents/choose'
 import { RuleAnalyzer } from '@/core/brief/analyzer'
@@ -51,6 +52,8 @@ export default function Gallery() {
   const sessionRef = useRef<InterviewSession | null>(null)
   const transportRef = useRef<SimulatedTransport | null>(null)
   const earRef = useRef<CandidateEar | null>(null)
+  /** The candidate's own seat in the RTC channel. Null until Agora is configured. */
+  const rtcRef = useRef<RtcChannel | null>(null)
   /** The thinking parts, chosen once the key probe answers. */
   const brainRef = useRef<Brain>({ analyzer: new RuleAnalyzer(), generator: new ScriptedGenerator() })
   /** The microphone callback needs the live value, not the one captured at start(). */
@@ -77,6 +80,7 @@ export default function Gallery() {
   const [notice, setNotice] = useState<string | null>(null)
   const [voiceSupported, setVoiceSupported] = useState(false)
   const [agoraLive, setAgoraLive] = useState(false)
+  const [rtcJoined, setRtcJoined] = useState(false)
   const [llmLive, setLlmLive] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
@@ -101,8 +105,23 @@ export default function Gallery() {
       )
       .then(() => setVoiceSupported(true))
 
-    // If the server holds Agora credentials, say so rather than overselling.
-    AgoraTransport.isConfigured().then(setAgoraLive)
+    // If the server holds Agora credentials, say so rather than overselling --
+    // and if it does, actually join the channel so the candidate is a real
+    // participant and the interviewers can be heard.
+    // Reuse the instance across a StrictMode remount. A fresh RtcChannel per
+    // mount means a fresh join queue per mount, and the two race for uid 1000.
+    const rtc = rtcRef.current ?? new RtcChannel()
+    rtcRef.current = rtc
+    AgoraTransport.isConfigured().then(async (configured) => {
+      setAgoraLive(configured)
+      if (!configured) return
+      const ok = await rtc.join(DEFAULT_CHANNEL.channelName, {
+        onError: (message) => setNotice(`RTC: ${message}`),
+      })
+      setRtcJoined(ok)
+      // A join that recovered should not leave a stale failure on screen.
+      if (ok) setNotice(null)
+    })
 
     // Same for the model: with no key the panel runs on the scripted ladder,
     // and the header says so rather than implying questions are being written.
@@ -114,6 +133,12 @@ export default function Gallery() {
         brainRef.current = chooseBrain(configured)
       })
       .catch(() => setLlmLive(false))
+
+    return () => {
+      // Leave the channel on unmount. Every agent left sitting in a channel
+      // bills, and a hot reload should not quietly open a second candidate.
+      void rtcRef.current?.leave()
+    }
   }, [])
 
   const refresh = useCallback(() => {
@@ -348,7 +373,8 @@ export default function Gallery() {
         <span className="wordmark">Quorum</span>
         <span className="strip-meta">
           {DEFAULT_CHANNEL.channelName} · remote_rtc_uids [{DEFAULT_CHANNEL.remoteRtcUids.join(', ')}] ·{' '}
-          {agoraLive ? 'agora' : 'simulated'} · {llmLive ? 'live questions' : 'scripted'}
+          {agoraLive ? (rtcJoined ? 'agora · in channel' : 'agora') : 'simulated'} ·{' '}
+          {llmLive ? 'live questions' : 'scripted'}
         </span>
         <span className="strip-spacer" />
         <span className="disclosure">
