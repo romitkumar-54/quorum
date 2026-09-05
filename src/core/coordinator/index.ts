@@ -52,6 +52,15 @@ export const DEFAULT_CONFIG: CoordinatorConfig = {
 }
 
 /** How badly each kind of open flag needs somebody to challenge it. */
+/**
+ * How many turns running one interviewer may hold the floor.
+ *
+ * A model asked "who should speak?" will happily name the same person every
+ * turn, because the strongest reason often stays the strongest. Two is a
+ * conversation; three is a monologue with two people watching.
+ */
+const MAX_CONSECUTIVE = 2
+
 const FLAG_URGENCY: Record<FlagKind, number> = {
   unchallenged_impact: 5,
   contradiction: 5,
@@ -114,6 +123,8 @@ export class Coordinator {
   private decisions: FloorDecision[] = []
   /** Flags each grant/interrupt was justified by, so we can mark them addressed. */
   private lastJustification: string[] = []
+  /** Who has been speaking, and for how many turns running. */
+  private consecutive: { agent: AgentId | null; count: number } = { agent: null, count: 0 }
 
   constructor(
     public mode: ChannelMode = 'coordinated',
@@ -138,7 +149,7 @@ export class Coordinator {
    * the floor. In `naive` mode every agent with something to say speaks — which
    * is the collision this whole project exists to prevent.
    */
-  openFloor(ctx: TurnContext): FloorDecision {
+  openFloor(ctx: TurnContext, preferred?: AgentId | null, preferredReason?: string): FloorDecision {
     const bids = this.collectBids(ctx, FLAG_WEIGHT_AT_GRANT)
     const eligible = bids.filter((b) => b.score >= this.config.minBidToSpeak)
     const latencyMs = Math.max(0, ctx.tNow - ctx.tSilenceDetected)
@@ -181,9 +192,17 @@ export class Coordinator {
     }
 
     // ── Coordinated mode: exactly one winner ─────────────────────────────────
-    if (eligible.length === 0) return this.recordSilence(ctx, bids, latencyMs)
+    //
+    // A model may nominate someone. It is a preference, not a grant: the name
+    // has to be an interviewer, and nobody may hold the floor more than
+    // MAX_CONSECUTIVE turns running however strongly the model feels. Whatever
+    // survives that, the invariant below is still enforced here rather than
+    // trusted to a prompt.
+    const nominated = this.honour(preferred, bids)
+    if (!nominated && eligible.length === 0) return this.recordSilence(ctx, bids, latencyMs)
 
-    const winner = pickWinner(eligible)
+    const winner = nominated ?? pickWinner(eligible)
+    this.noteConsecutive(winner.agent)
     this.floorHolder = winner.agent
     this.turnLastSpoke[winner.agent] = ctx.brief.turn
     this.lastJustification = winner.backedBy
@@ -191,7 +210,7 @@ export class Coordinator {
     return this.record({
       kind: 'grant',
       grantedTo: winner.agent,
-      reason: winner.rationale,
+      reason: nominated && preferredReason ? preferredReason : winner.rationale,
       bids,
       tDecision: ctx.tNow,
       latencyMs,
@@ -244,6 +263,7 @@ export class Coordinator {
     this.turnLastSpoke = { technical: -1, product: -1, behavioural: -1 }
     this.decisions = []
     this.lastJustification = []
+    this.consecutive = { agent: null, count: 0 }
   }
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -252,6 +272,20 @@ export class Coordinator {
    * Every agent scores itself against the shared brief. The rationale string is
    * built here, so what the screen shows is literally why the agent bid.
    */
+  /** A nomination the rules allow, or null to fall back to the bids. */
+  private honour(preferred: AgentId | null | undefined, bids: Bid[]): Bid | null {
+    if (!preferred || !AGENT_IDS.includes(preferred)) return null
+    if (this.consecutive.agent === preferred && this.consecutive.count >= MAX_CONSECUTIVE) return null
+    return bids.find((b) => b.agent === preferred) ?? null
+  }
+
+  private noteConsecutive(agent: AgentId): void {
+    this.consecutive =
+      this.consecutive.agent === agent
+        ? { agent, count: this.consecutive.count + 1 }
+        : { agent, count: 1 }
+  }
+
   private collectBids(ctx: TurnContext, flagWeight: number): Bid[] {
     const open = ctx.brief.flags.filter((f) => !f.addressed)
 

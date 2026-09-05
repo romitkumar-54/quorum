@@ -27,6 +27,7 @@ import { Coordinator, DEFAULT_CONFIG, type CoordinatorConfig } from '@/core/coor
 import { computeMetrics, type Metrics } from '@/core/metrics'
 import { SessionClock, TranscriptLog, estimateDuration } from '@/core/transcript'
 import { ScriptedGenerator, type QuestionGenerator } from '@/agents'
+import type { FloorPicker } from '@/agents/floor'
 import type { Assessment } from '@/core/brief'
 
 export interface SessionStep {
@@ -42,6 +43,8 @@ export interface SessionOptions {
   mode?: ChannelMode
   analyzer?: Analyzer
   generator?: QuestionGenerator
+  /** Names who should take the floor. A preference — the coordinator still decides. */
+  floor?: FloorPicker
   config?: CoordinatorConfig
   /**
    * How long the coordinator takes to decide once silence is detected, in ms.
@@ -62,6 +65,7 @@ export class InterviewSession {
 
   private clock = new SessionClock()
   private generator: QuestionGenerator
+  private floor?: FloorPicker
   private decisionLatency: () => number
   private holdBeforeRecheck: () => number
   /** Utterances that were cut off rather than finished. */
@@ -72,6 +76,7 @@ export class InterviewSession {
     this.brief = new BriefBuilder(options.analyzer)
     this.coordinator = new Coordinator(options.mode ?? 'coordinated', options.config ?? DEFAULT_CONFIG)
     this.generator = options.generator ?? new ScriptedGenerator()
+    this.floor = options.floor
     // 40–90 ms of deliberation by default: fast enough to feel instant, honest
     // enough that the reported p50 is a real number.
     this.decisionLatency = options.decisionLatency ?? (() => 40 + Math.random() * 50)
@@ -95,12 +100,25 @@ export class InterviewSession {
     const decisions: FloorDecision[] = []
     const utterances: TranscriptEvent[] = []
 
-    const grant = this.coordinator.openFloor({
-      brief,
-      leadCompetency,
-      tSilenceDetected,
-      tNow: tSilenceDetected + this.decisionLatency(),
-    })
+    // The model nominates; the coordinator decides whether that is allowed.
+    const nomination = this.floor
+      ? await this.floor.pick({
+          brief,
+          transcript: this.transcript.all(),
+          recentSpeakers: this.recentSpeakers(),
+        })
+      : null
+
+    const grant = this.coordinator.openFloor(
+      {
+        brief,
+        leadCompetency,
+        tSilenceDetected,
+        tNow: tSilenceDetected + this.decisionLatency(),
+      },
+      nomination?.agent ?? null,
+      nomination?.reason,
+    )
     decisions.push(grant)
 
     // ── Naive mode: everyone who bid is now talking over everyone else ────────
@@ -154,6 +172,15 @@ export class InterviewSession {
 
   metrics(): Metrics {
     return computeMetrics(this.coordinator.log())
+  }
+
+  /** Who has held the floor recently, oldest first. Context for the coordinator. */
+  private recentSpeakers(): AgentId[] {
+    return this.transcript
+      .all()
+      .filter((e) => e.speaker !== 'candidate')
+      .slice(-4)
+      .map((e) => e.speaker as AgentId)
   }
 
   /** Ids of utterances that ended because somebody cut in. */
