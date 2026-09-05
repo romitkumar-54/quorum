@@ -18,7 +18,7 @@ export interface AnalysisResult {
 }
 
 export interface Analyzer {
-  analyze(event: TranscriptEvent, brief: Brief): AnalysisResult
+  analyze(event: TranscriptEvent, brief: Brief): Promise<AnalysisResult>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ export function __resetAnalyzerIds(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class RuleAnalyzer implements Analyzer {
-  analyze(event: TranscriptEvent, brief: Brief): AnalysisResult {
+  async analyze(event: TranscriptEvent, brief: Brief): Promise<AnalysisResult> {
     // Only the candidate makes claims. Interviewer speech is not evidence.
     if (event.speaker !== 'candidate' || !event.final) {
       return { claims: [], flags: [] }

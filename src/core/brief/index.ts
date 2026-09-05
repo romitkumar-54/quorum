@@ -45,8 +45,8 @@ export class BriefBuilder {
    * the claims decide which interviewer picks the thread up, and the flags are
    * what the coordinator bids on.
    */
-  ingest(event: TranscriptEvent): { brief: Brief; newClaims: Claim[]; newFlags: Flag[] } {
-    const { claims, flags } = this.analyzer.analyze(event, this.brief)
+  async ingest(event: TranscriptEvent): Promise<{ brief: Brief; newClaims: Claim[]; newFlags: Flag[] }> {
+    const { claims, flags } = await this.analyzer.analyze(event, this.brief)
 
     const next: Brief = {
       turn: event.speaker === 'candidate' ? this.brief.turn + 1 : this.brief.turn,

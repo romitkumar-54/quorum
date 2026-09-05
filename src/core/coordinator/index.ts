@@ -55,8 +55,23 @@ export const DEFAULT_CONFIG: CoordinatorConfig = {
 const FLAG_URGENCY: Record<FlagKind, number> = {
   unchallenged_impact: 5,
   contradiction: 5,
+  // Dodging a direct question is as telling as contradicting yourself, and
+  // leaving the interview entirely has to be answered before anything else.
+  evasion: 5,
+  off_topic: 6,
   vague: 2,
 }
+
+/**
+ * Urgency of a kind the table has not heard of.
+ *
+ * The analyst is validated, but a flag kind arriving from a model is still
+ * outside data. Without this, one unknown kind turned every bid into NaN and
+ * the floor went to an arbitrary agent — silently, because NaN sorts without
+ * complaining.
+ */
+const UNKNOWN_URGENCY = 3
+const urgencyOf = (kind: FlagKind): number => FLAG_URGENCY[kind] ?? UNKNOWN_URGENCY
 
 /**
  * Weight on "the candidate just said something in my area". This is deliberately
@@ -250,8 +265,8 @@ export class Coordinator {
       // the agent actually speaks to.
       const mine = open
         .filter((f) => profile.cares.includes(f.kind) && f.competency === profile.owns)
-        .sort((a, b) => FLAG_URGENCY[b.kind] - FLAG_URGENCY[a.kind])
-      const urgency = mine.reduce((sum, f) => sum + FLAG_URGENCY[f.kind], 0) * flagWeight
+        .sort((a, b) => urgencyOf(b.kind) - urgencyOf(a.kind))
+      const urgency = mine.reduce((sum, f) => sum + urgencyOf(f.kind), 0) * flagWeight
       const relevant = ctx.leadCompetency === profile.owns
       const relevance = relevant ? RELEVANCE_WEIGHT : 0
       const idleTurns = ctx.brief.turn - this.turnLastSpoke[id]

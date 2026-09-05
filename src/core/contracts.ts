@@ -90,6 +90,10 @@ export type FlagKind =
   | 'contradiction'
   /** Candidate asserted user impact without ever quantifying it. */
   | 'unchallenged_impact'
+  /** Asked something concrete, answered around it. Dodged rather than wrong. */
+  | 'evasion'
+  /** Left the interview entirely, or turned a question back on the panel. */
+  | 'off_topic'
 
 export interface Flag {
   id: string
@@ -231,7 +235,7 @@ export const AGENTS: Record<AgentId, AgentProfile> = {
     displayName: 'Technical',
     role: 'Senior engineer. Probes correctness, complexity and trade-offs.',
     owns: 'algorithms',
-    cares: ['vague'],
+    cares: ['vague', 'evasion'],
     priority: 2,
     accent: '#4ea1ff',
     voice: { pitch: 0.85, rate: 1.02, prefer: ['Google UK English Male', 'Daniel', 'Microsoft Guy'] },
@@ -241,7 +245,7 @@ export const AGENTS: Record<AgentId, AgentProfile> = {
     displayName: 'Product',
     role: 'Product manager. Asks who the work helped and by how much.',
     owns: 'impact',
-    cares: ['unchallenged_impact', 'vague'],
+    cares: ['unchallenged_impact', 'vague', 'evasion'],
     priority: 3,
     accent: '#ff5f56',
     voice: { pitch: 1.15, rate: 1.0, prefer: ['Google US English', 'Samantha', 'Microsoft Aria'] },
@@ -251,7 +255,7 @@ export const AGENTS: Record<AgentId, AgentProfile> = {
     displayName: 'Behavioural',
     role: 'Hiring manager. Tests consistency and how the candidate holds up under push.',
     owns: 'communication',
-    cares: ['contradiction'],
+    cares: ['contradiction', 'off_topic', 'evasion'],
     priority: 1,
     accent: '#f0b429',
     voice: { pitch: 1.0, rate: 0.94, prefer: ['Google UK English Female', 'Karen', 'Microsoft Sonia'] },

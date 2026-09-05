@@ -88,7 +88,7 @@ export class InterviewSession {
    */
   async candidateSays(text: string, at?: number): Promise<SessionStep> {
     const candidateEvent = this.transcript.append({ speaker: 'candidate', text, tStart: at })
-    const { brief, newClaims } = this.brief.ingest(candidateEvent)
+    const { brief, newClaims } = await this.brief.ingest(candidateEvent)
 
     const leadCompetency: Competency | undefined = newClaims[0]?.competency
     const tSilenceDetected = candidateEvent.tEnd
