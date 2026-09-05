@@ -71,6 +71,7 @@ export default function Gallery() {
   const [voiceSupported, setVoiceSupported] = useState(false)
   const [agoraLive, setAgoraLive] = useState(false)
   const [llmLive, setLlmLive] = useState(false)
+  const [deterministic, setDeterministic] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -232,9 +233,10 @@ export default function Gallery() {
     setBusy(true)
     setAssessment(null)
     earRef.current?.mute()
-    // The rehearsal has to be identical every time it runs, so it borrows the
-    // deterministic panel even when a key is present.
-    session.setGenerator(new ScriptedGenerator())
+    // The rehearsal thinks for itself, like every other turn. Ticking
+    // "deterministic" borrows the scripted panel instead, so a run in front of
+    // judges plays exactly the way it did in practice.
+    if (deterministic) session.setGenerator(new ScriptedGenerator())
     try {
       for (let i = demoIndex; i < DEMO_TRANSCRIPT.length; i++) {
         const turn = DEMO_TRANSCRIPT[i]
@@ -249,7 +251,7 @@ export default function Gallery() {
       busyRef.current = false
       setBusy(false)
     }
-  }, [demoIndex, play])
+  }, [demoIndex, deterministic, play])
 
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
@@ -353,18 +355,28 @@ export default function Gallery() {
           </button>
         </div>
 
-        <button type="button" className="btn" data-primary="true" onClick={runWholeDemo} disabled={busy || demoDone}>
+        {/* The way in. Deliberately never disabled: you must be able to cut the
+            microphone while the panel is mid-sentence. */}
+        <button type="button" className="btn" data-primary="true" onClick={toggleMic}>
+          {listening ? 'Stop microphone' : 'Answer by voice'}
+        </button>
+
+        <button type="button" className="btn" onClick={runWholeDemo} disabled={busy || demoDone}>
           {demoDone ? 'Rehearsal complete' : 'Run rehearsed interview'}
         </button>
 
+        <label className="toggle" title="Borrow the scripted panel so the rehearsal plays identically every time.">
+          <input
+            type="checkbox"
+            checked={deterministic}
+            onChange={(event) => setDeterministic(event.target.checked)}
+            disabled={busy}
+          />
+          deterministic
+        </label>
+
         <button type="button" className="btn" onClick={nextRehearsedTurn} disabled={busy || demoDone}>
           Next turn
-        </button>
-
-        {/* Deliberately never disabled: you must be able to cut the microphone
-            while the panel is mid-sentence. */}
-        <button type="button" className="btn" onClick={toggleMic}>
-          {listening ? 'Stop microphone' : 'Answer by voice'}
         </button>
 
         <button
@@ -381,9 +393,18 @@ export default function Gallery() {
         </button>
       </div>
 
+      {listening && (
+        <div className="controls">
+          <span className="hearing" data-muted={busy} aria-live="polite">
+            {hearing ? `“${hearing}”` : busy ? 'Microphone off while the panel speaks' : 'Listening…'}
+          </span>
+        </div>
+      )}
+
       <div className="controls">
         <form
           className="field"
+          data-fallback="true"
           onSubmit={(event) => {
             event.preventDefault()
             const text = answer
@@ -394,23 +415,15 @@ export default function Gallery() {
           <input
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}
-            placeholder="Answer the panel in your own words"
+            placeholder="…or type instead, if the microphone will not cooperate"
             disabled={busy}
             aria-label="Your answer"
           />
           <button type="submit" className="btn" disabled={busy || !answer.trim()}>
-            Say it
+            Send
           </button>
         </form>
       </div>
-
-      {listening && (
-        <div className="controls">
-          <span className="hearing" data-muted={busy} aria-live="polite">
-            {hearing ? `“${hearing}”` : busy ? 'Microphone off while the panel speaks' : 'Listening…'}
-          </span>
-        </div>
-      )}
 
       {notice && (
         <div className="controls" style={{ color: 'var(--bid)' }}>

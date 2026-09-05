@@ -121,6 +121,32 @@ button {
   background: var(--evidence);
 }
 
+/* The rehearsal's determinism switch. Small on purpose: it is a safety net,
+   not a mode anyone should be choosing between on the way in. */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--read-faint);
+  user-select: none;
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: var(--bid);
+  cursor: pointer;
+}
+
+/* Typing is the fallback now, and looks like one. */
+.field[data-fallback='true'] {
+  opacity: 0.75;
+}
+
+.field[data-fallback='true']:focus-within {
+  opacity: 1;
+}
+
 /* The live caption under the controls: proof the microphone is hearing you,
    and proof it has stopped listening while the panel talks. */
 .hearing {
