@@ -43,6 +43,20 @@ export interface TransportStatus {
   note?: string
 }
 
+/**
+ * One line an agent said, as the transport reports it back.
+ *
+ * Mirrors the fields Agora's `history` returns and nothing more, so this stays
+ * a report of what happened rather than a second transcript format.
+ */
+export interface TransportUtterance {
+  /** Agora's own turn counter for this agent. */
+  turnId: number
+  text: string
+  /** ms, on the transport's clock rather than the session's. */
+  startMs?: number
+}
+
 export interface Transport {
   readonly name: string
   readonly implementation: 'simulated' | 'agora'
@@ -72,5 +86,20 @@ export interface Transport {
   speak(agent: AgentId, text: string): Promise<void>
   /** Stop whoever is speaking, immediately. This is barge-in, and the yield path. */
   interrupt(): Promise<void>
+  /**
+   * What this agent has actually said, oldest first.
+   *
+   * Only meaningful when `generatesOwnLines` is true: there the words are
+   * written inside the transport and never pass through this process, so the
+   * transcript has to read them back rather than remember them. Absent on the
+   * simulator, which already knows every line it was handed.
+   */
+  history?(agent: AgentId): Promise<TransportUtterance[]>
+  /**
+   * How this agent is doing, in the transport's own words, or null if the
+   * transport has no notion of an agent failing. An agent that has died stops
+   * being worth waiting for.
+   */
+  agentState?(agent: AgentId): Promise<string | null>
   leave(): Promise<void>
 }

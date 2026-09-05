@@ -21,7 +21,12 @@
  */
 
 import type { AgentId, ChannelConfig } from '@/core/contracts'
-import type { AgentJoinSpec, Transport, TransportStatus } from '@/transport/types'
+import type {
+  AgentJoinSpec,
+  Transport,
+  TransportStatus,
+  TransportUtterance,
+} from '@/transport/types'
 
 export class AgoraTransport implements Transport {
   readonly name = 'Agora Conversational AI'
@@ -98,14 +103,64 @@ export class AgoraTransport implements Transport {
     this.joined = []
   }
 
-  private async post(payload: unknown): Promise<{ ok?: boolean; error?: string }> {
+  /**
+   * Read back what this agent said.
+   *
+   * In coordinated mode the line is written by the agent's own Agora-managed
+   * model and spoken straight into the channel, so this process never sees it.
+   * `GET .../history` is the only way the transcript can learn the words.
+   *
+   * Only `assistant` entries are ours to show. A `think`-driven turn also
+   * writes a `user` entry -- the answer we injected -- and the candidate is
+   * already in the transcript from their own microphone.
+   */
+  async history(agent: AgentId): Promise<TransportUtterance[]> {
+    const body = await this.post({
+      action: 'history',
+      channelName: this.channelName,
+      agentId: agent,
+    })
+    const contents = Array.isArray(body.contents) ? body.contents : []
+
+    return contents
+      .map(
+        (entry) =>
+          entry as { turn_id?: number; role?: string; content?: string; speech_start_ms?: number },
+      )
+      .filter((entry) => entry.role === 'assistant')
+      .filter((entry) => typeof entry.content === 'string' && entry.content.trim() !== '')
+      .map((entry) => ({
+        turnId: Number(entry.turn_id ?? 0),
+        text: String(entry.content).trim(),
+        startMs: entry.speech_start_ms,
+      }))
+  }
+
+  /**
+   * What Agora says about this agent right now.
+   *
+   * An agent can be accepted, report RUNNING, and be dead a second later --
+   * that is the failure mode the empty-token bug produced, and it is silent.
+   */
+  async agentState(agent: AgentId): Promise<string | null> {
+    const body = (await this.post({
+      action: 'state',
+      channelName: this.channelName,
+      agentId: agent,
+    })) as { state?: string }
+    return body.state ?? null
+  }
+
+  private async post(
+    payload: unknown,
+  ): Promise<{ ok?: boolean; error?: string; contents?: unknown[] }> {
     try {
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      return (await res.json()) as { ok?: boolean; error?: string }
+      return (await res.json()) as { ok?: boolean; error?: string; contents?: unknown[] }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'network error'
       this.lastError = message

@@ -201,7 +201,7 @@ export class Coordinator {
     const nominated = this.honour(preferred, bids)
     if (!nominated && eligible.length === 0) return this.recordSilence(ctx, bids, latencyMs)
 
-    const winner = nominated ?? pickWinner(eligible)
+    const winner = nominated ?? this.pickRotating(eligible)
     this.noteConsecutive(winner.agent)
     this.floorHolder = winner.agent
     this.turnLastSpoke[winner.agent] = ctx.brief.turn
@@ -277,6 +277,31 @@ export class Coordinator {
     if (!preferred || !AGENT_IDS.includes(preferred)) return null
     if (this.consecutive.agent === preferred && this.consecutive.count >= MAX_CONSECUTIVE) return null
     return bids.find((b) => b.agent === preferred) ?? null
+  }
+
+  /**
+   * The strongest bid, unless that agent has already held the floor
+   * MAX_CONSECUTIVE turns running.
+   *
+   * This cap used to live only in `honour`, because a *model* naming the same
+   * person every turn was the only way a monologue could happen. With the
+   * nominator retired the highest bid is the only path left, and it monologues
+   * for a more mechanical reason: an answer matching nobody's keywords
+   * classifies as `communication`, which hands Behavioural the full relevance
+   * weight on almost every conversational turn. Left alone, one interviewer
+   * runs the entire interview and the other two never speak.
+   *
+   * Yielding is not a demotion. The agent keeps its open flags, and comes back
+   * the moment somebody else has had a turn.
+   */
+  private pickRotating(eligible: Bid[]): Bid {
+    const best = pickWinner(eligible)
+    if (this.consecutive.agent !== best.agent || this.consecutive.count < MAX_CONSECUTIVE) {
+      return best
+    }
+
+    const others = eligible.filter((b) => b.agent !== best.agent)
+    return others.length > 0 ? pickWinner(others) : best
   }
 
   private noteConsecutive(agent: AgentId): void {

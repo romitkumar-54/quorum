@@ -92,8 +92,28 @@ function mintToken(env: AgoraEnv, channel: string, uid: number): string {
   )
 }
 
-/** Agent instance ids returned by `join`, keyed by our own agent id. */
+/**
+ * Agent instance ids returned by `join`, keyed by channel *and* agent id.
+ *
+ * The channel half is load-bearing. Two people interviewing at once are two
+ * channels, and both have a "technical" -- keyed by agent id alone the second
+ * join would overwrite the first, and the first candidate's coordinator would
+ * then be steering the second candidate's panel.
+ *
+ * This is process memory: it does not survive a restart, which is why `join`
+ * also sweeps the channel it is about to claim.
+ */
 const liveAgents = new Map<string, string>()
+
+const key = (channel: string, agentId: unknown) => `${channel}::${String(agentId)}`
+
+/** Every agent this process knows about in one channel. */
+function agentsIn(channel: string): { agentId: string; instanceId: string }[] {
+  const prefix = `${channel}::`
+  return [...liveAgents.entries()]
+    .filter(([k]) => k.startsWith(prefix))
+    .map(([k, instanceId]) => ({ agentId: k.slice(prefix.length), instanceId }))
+}
 
 export async function GET() {
   const env = readEnv()
@@ -131,12 +151,14 @@ export async function POST(request: Request) {
         return NextResponse.json(await think(env, body))
       case 'history':
         return NextResponse.json(await history(env, body))
+      case 'state':
+        return NextResponse.json(await agentState(env, body))
       case 'speak':
         return NextResponse.json(await speak(env, body))
       case 'interrupt':
         return NextResponse.json(await interrupt(env, body))
       case 'leave':
-        return NextResponse.json(await leave(env))
+        return NextResponse.json(await leave(env, body))
       default:
         return NextResponse.json({ ok: false, error: `Unknown action "${action}".` }, { status: 400 })
     }
@@ -178,7 +200,8 @@ function candidateToken(env: AgoraEnv, body: Record<string, unknown>) {
  * -- which is how we tell a coordinator-driven turn from a self-triggered one.
  */
 async function history(env: AgoraEnv, body: Record<string, unknown>) {
-  const instanceId = liveAgents.get(String(body.agentId))
+  const channel = String(body.channelName ?? 'interview-01')
+  const instanceId = liveAgents.get(key(channel, body.agentId))
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
   const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/history`, {
@@ -188,6 +211,27 @@ async function history(env: AgoraEnv, body: Record<string, unknown>) {
 
   const json = (await res.json()) as { contents?: unknown[] }
   return { ok: res.ok, contents: json.contents ?? [] }
+}
+
+/**
+ * Is this agent still alive?
+ *
+ * We have seen `FAILED -- "agent exits with reason: RTC connection error"` in
+ * the wild, and nothing in the app noticed: the interview simply went quiet.
+ *
+ * The path is `/agents/{id}`. It is not `/agents/{id}/query`, which is the
+ * shape the documentation suggests and which does not exist.
+ */
+async function agentState(env: AgoraEnv, body: Record<string, unknown>) {
+  const channel = String(body.channelName ?? 'interview-01')
+  const instanceId = liveAgents.get(key(channel, body.agentId))
+  if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
+
+  const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}`, {
+    headers: { Authorization: authHeader(env) },
+  })
+  const json = (await res.json()) as { status?: string; state?: string; message?: string }
+  return { ok: res.ok, state: json.status ?? json.state, detail: json.message }
 }
 
 interface JoinAgent {
@@ -212,11 +256,54 @@ interface JoinAgent {
  * users in `remote_rtc_uids` have left, and SILENT_UID never arrives -- so any
  * non-zero timeout would quietly kill the whole panel mid-interview.
  */
+/**
+ * Retire anything still running in a channel we are about to claim.
+ *
+ * Two things make this necessary rather than tidy. `idle_timeout: 0` means an
+ * agent never exits on its own, so a candidate who closed the tab without the
+ * beacon landing leaves three of them billing. And `liveAgents` is process
+ * memory: a server restart forgets every instance id it was holding, while the
+ * agents themselves carry on regardless.
+ *
+ * It only ever touches the one channel being joined, so it can never end an
+ * interview somebody else is in the middle of.
+ */
+async function sweep(env: AgoraEnv, channel: string): Promise<number> {
+  try {
+    const res = await fetch(
+      `${AGORA_BASE}/${env.appId}/agents?channel=${encodeURIComponent(channel)}&state=1,2&limit=50`,
+      { headers: { Authorization: authHeader(env) } },
+    )
+    if (!res.ok) return 0
+
+    const json = (await res.json()) as {
+      data?: { list?: { agent_id?: string }[] }
+      list?: { agent_id?: string }[]
+    }
+    const orphans = (json.data?.list ?? json.list ?? []).filter((a) => a.agent_id)
+
+    for (const orphan of orphans) {
+      await fetch(`${AGORA_BASE}/${env.appId}/agents/${orphan.agent_id}/leave`, {
+        method: 'POST',
+        headers: { Authorization: authHeader(env) },
+      })
+    }
+    return orphans.length
+  } catch {
+    // A sweep that fails must not stop an interview from starting.
+    return 0
+  }
+}
+
 async function join(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
   const naive = body.mode === 'naive'
   const agents = (body.agents ?? []) as JoinAgent[]
   const results: { agentId: string; instanceId?: string; error?: string }[] = []
+
+  // Reclaim the channel before seating a new panel in it.
+  const reclaimed = await sweep(env, channel)
+  for (const { agentId } of agentsIn(channel)) liveAgents.delete(key(channel, agentId))
 
   for (const [index, agent] of agents.entries()) {
     const uid = 1001 + index
@@ -289,7 +376,7 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
 
     const json = (await res.json()) as { agent_id?: string; message?: string; detail?: string }
     if (res.ok && json.agent_id) {
-      liveAgents.set(agent.agentId, json.agent_id)
+      liveAgents.set(key(channel, agent.agentId), json.agent_id)
       results.push({ agentId: agent.agentId, instanceId: json.agent_id })
     } else {
       results.push({
@@ -300,7 +387,7 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
   }
 
   const failed = results.filter((r) => r.error)
-  return { ok: failed.length === 0, agents: results, error: failed[0]?.error }
+  return { ok: failed.length === 0, agents: results, reclaimed, error: failed[0]?.error }
 }
 
 /**
@@ -317,7 +404,8 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
  * agent is somehow already talking, do not let it talk over itself.
  */
 async function think(env: AgoraEnv, body: Record<string, unknown>) {
-  const instanceId = liveAgents.get(String(body.agentId))
+  const channel = String(body.channelName ?? 'interview-01')
+  const instanceId = liveAgents.get(key(channel, body.agentId))
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
   const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/think`, {
@@ -344,7 +432,8 @@ async function think(env: AgoraEnv, body: Record<string, unknown>) {
  * interrupt path. Agora caps the text at 512 bytes.
  */
 async function speak(env: AgoraEnv, body: Record<string, unknown>) {
-  const instanceId = liveAgents.get(String(body.agentId))
+  const channel = String(body.channelName ?? 'interview-01')
+  const instanceId = liveAgents.get(key(channel, body.agentId))
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
   const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/speak`, {
@@ -362,10 +451,12 @@ async function speak(env: AgoraEnv, body: Record<string, unknown>) {
 
 /** The yield path -- stop the agent that was told to stand down. */
 async function interrupt(env: AgoraEnv, body: Record<string, unknown>) {
-  const target = body.agentId ? [String(body.agentId)] : [...liveAgents.keys()]
-  for (const id of target) {
-    const instanceId = liveAgents.get(id)
-    if (!instanceId) continue
+  const channel = String(body.channelName ?? 'interview-01')
+  const targets = body.agentId
+    ? agentsIn(channel).filter((a) => a.agentId === String(body.agentId))
+    : agentsIn(channel)
+
+  for (const { instanceId } of targets) {
     await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/interrupt`, {
       method: 'POST',
       headers: { Authorization: authHeader(env), 'Content-Type': 'application/json' },
@@ -379,14 +470,15 @@ async function interrupt(env: AgoraEnv, body: Record<string, unknown>) {
  * Leave, always. Every joined agent bills $0.10/min for as long as it sits in
  * the channel, and the free allowance is 300 minutes across the whole account.
  */
-async function leave(env: AgoraEnv) {
-  for (const instanceId of liveAgents.values()) {
+async function leave(env: AgoraEnv, body: Record<string, unknown>) {
+  const channel = String(body.channelName ?? 'interview-01')
+  for (const { agentId, instanceId } of agentsIn(channel)) {
     await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/leave`, {
       method: 'POST',
       headers: { Authorization: authHeader(env) },
     })
+    liveAgents.delete(key(channel, agentId))
   }
-  liveAgents.clear()
   return { ok: true }
 }
 

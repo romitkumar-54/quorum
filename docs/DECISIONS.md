@@ -5,6 +5,168 @@ into the Atrium room as-is.
 
 ---
 
+## 2026-09-06 — What the first real conversation broke
+
+Everything above was verified by driving the app. This entry is what a person
+found in the first minute of actually talking to it, and none of it was visible
+from a passing test.
+
+### One interviewer ran the whole interview
+
+Behavioural answered every turn; Technical and Product never spoke. Two causes,
+and they needed each other:
+
+- `RuleAnalyzer.classify` returns `communication` for any sentence matching
+  neither the impact nor the algorithm vocabulary — which is most ordinary
+  speech — and `communication` is Behavioural's competency, worth the full
+  `RELEVANCE_WEIGHT` of 4. Nothing else can reach that from a baseline of 1.
+- The anti-monologue cap, `MAX_CONSECUTIVE`, was only ever checked inside
+  `honour`, which runs on a **model's nomination**. Retiring `LlmFloor` left
+  `preferred` permanently null, so the cap stopped being reached at all.
+
+The cap now applies to whoever actually wins the floor, not only to a nominee.
+`tests/rotation.test.ts` reproduces the original failure — six ordinary answers,
+one speaker — and fails without the fix.
+
+That cap is the safety net. The cause was the classifier, and it is fixed too.
+
+### Each interviewer has its own vocabulary now
+
+`classify` answered three questions with two tests — impact language, or
+algorithm language, or, for everything else, `communication`. Behavioural
+therefore owned all ordinary speech, and since the lead competency carries the
+largest single term in a bid, it owned the interview.
+
+Three changes, in `src/core/brief/analyzer.ts`:
+
+- **Behavioural has a real vocabulary.** Teams, managers, disagreement,
+  explaining, feedback, deadlines, mistakes. It earns a turn on the same terms
+  as the other two rather than by default.
+- **Signals are weighed, not ordered.** A sentence goes to whichever territory
+  it points at hardest, so "I refactored the database schema and the team saw
+  it" is Technical's and not filed under whichever test happened to run first.
+  Ties still go to Product, keeping the older reading of "faster for users".
+- **A sentence may point nowhere.** `AnalysisResult.lead` is now optional, and
+  "I studied computer science at university" names nobody. No relevance bonus is
+  handed out, and the floor moves on fairness instead. This is the actual bug:
+  biography used to be a claim on Behavioural's territory.
+
+`InterviewSession` takes the lead from the analyst rather than reading it off
+the first claim, because only the analyst knows whether the sentence pointed
+anywhere at all.
+
+Verified live against Agora — three answers, three interviewers, each asking
+about its own subject:
+
+```
+candidate    I replaced the linear scan with a hash map so lookups are constant time.
+  technical  "How do you handle hash collisions in your constant time lookup?"
+
+candidate    It cut checkout time for our customers and conversion went up by 4 percent.
+  product    "How did you measure that 4 percent increase in conversion, and over
+              what time period?"
+
+candidate    My manager disagreed with me so I explained the trade-off to the team.
+  behavioural "You said your manager disagreed, but then you explained the
+              trade-off to the team…"
+```
+
+### The microphone died and blamed the candidate
+
+Any recogniser error that was not explicitly benign called `stop()` and reported
+*"Microphone unavailable or permission denied."* Chrome raises `network` against
+its own recognition service on a long session, so one blip ended listening for
+the rest of the interview while the page went on saying "Listening…".
+
+Only `not-allowed` and `service-not-allowed` are fatal now. Everything else
+reopens, with a widening backoff so a failing recogniser cannot spin.
+
+### `en-IN` was decided on 2026-09-05 and only half-applied
+
+That decision named two places: the Agora join payload and the browser
+recogniser. The route was changed; `src/speech/index.ts` was left on `en-US`,
+scoring Indian English against a US model for a day.
+
+### A spoken line is not finished when the request returns
+
+Agora's `speak` resolves when the request is **accepted**, not when the agent
+stops talking — the simulator's resolves on the last word, which is why nothing
+caught it. The session therefore believed the panel was done while it was still
+mid-sentence: the microphone reopened into the panel's own voice, and the next
+`think` was dropped outright, because every `think` carries
+`on_speaking_action: 'ignore'`. That is why the turn after the greeting fell
+back to a scripted line for no visible reason. The session now waits out the
+estimated speech duration.
+
+### The interview opened cold
+
+It began with a bare question — no greeting, and the AI disclosure lived only in
+the header. `ScriptedGenerator` accepted an `opening` flag and ignored it. There
+is now a fixed `OPENING_LINE`: hello, the disclosure, a warning that three
+interviewers will take turns, and an easy first question. It is spoken rather
+than generated so the disclosure cannot drift.
+
+---
+
+## 2026-09-06 — The panel is on Agora, and the LLM moved from the decision to the words
+
+The transport swap is done. `AgoraTransport` is constructed when the server
+holds all four credentials, three agents are created when the interview starts,
+the floor is granted with `think`, and the transcript is read back from
+`history`. Verified live, in a browser, on this date.
+
+**What the panel says is now written inside Agora.** Nothing in this process
+composes an interviewer's line any more, except as a fallback.
+
+### The external model is gone
+
+`LlmGenerator`, `LlmAnalyst`, `LlmFloor`, `requestCompletion`, the message
+builder and `/api/interviewer` are deleted. No source file reads `LLM_API_KEY`,
+and `.env.example` still lists exactly four credentials.
+
+**The accepted consequence:** the floor *decision* is now pure code. `LlmFloor`
+nominated a speaker and the `Coordinator` ruled on it; with no model on this
+side there is nothing to nominate, so the coordinator decides alone. This is
+still LLM + code — the split just moved. The LLM writes the words; the code
+picks the mouth. Restoring a nominator needs either an external key or a fourth
+agent, and both are new architecture.
+
+`RuleAnalyzer` stays and is not a fallback: it builds the brief — claims, flags,
+difficulty — which is what the coordinator ranks bids on, and none of it wants a
+model. `ScriptedGenerator` stays as the line an agent gets when Agora does not
+answer in time.
+
+### The opener is spoken, never thought
+
+The first line discloses that the panel is not human. That is a requirement, not
+a flourish, so it goes out through `speak` with fixed words. A model asked to
+greet a candidate might not disclose anything.
+
+### One channel per interview
+
+`interview-01` was a single room. Two candidates at once meant the second was
+rejected for the uid the first was holding, and had they both got in they would
+have heard each other. Channels are now `interview-<n>` per visit, and agents are
+keyed by channel *and* role in the route — keyed by role alone, a second join
+overwrote the first and one candidate's coordinator steered another's panel.
+
+### Leaving is a money bug, and it is handled
+
+With `idle_timeout: 0` an agent never exits on its own; three left behind bill
+about $18/hour to Agora's 72-hour cap. Leaving now happens on End, on unmount,
+and on tab close via `navigator.sendBeacon` — `fetch` during unload is routinely
+cancelled. The server also sweeps any agent still running in a channel it is
+about to claim, because the route's memory of live agents does not survive a
+restart. **Verified:** three agents RUNNING, tab killed, zero left.
+
+### Still not verified
+
+Barge-in against live Agora audio (requirement 1) has never been tested with a
+human voice, and token renewal has never been watched across the one-hour
+expiry. Both are written; neither has been seen working.
+
+---
+
 ## 2026-09-06 — The design is no longer a plan. It ran.
 
 Everything below this entry was reasoned from documentation. This one was

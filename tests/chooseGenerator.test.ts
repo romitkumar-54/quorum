@@ -1,14 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { ScriptedGenerator } from '@/agents'
-import { LlmGenerator } from '@/agents/llm'
-import { chooseGenerator } from '@/agents/choose'
+import { chooseBrain, chooseGenerator } from '@/agents/choose'
+import { RuleAnalyzer } from '@/core/brief/analyzer'
 
-describe('which brain drives the panel', () => {
-  it('uses the model when the route reports a key', () => {
-    expect(chooseGenerator(true)).toBeInstanceOf(LlmGenerator)
+describe('what still thinks on this side of the channel', () => {
+  it('builds the brief with the rule analyser', () => {
+    expect(chooseBrain().analyzer).toBeInstanceOf(RuleAnalyzer)
   })
 
-  it('uses the scripted panel when there is no key', () => {
-    expect(chooseGenerator(false)).toBeInstanceOf(ScriptedGenerator)
+  it('keeps the deterministic generator, which is the fallback and the simulator', () => {
+    expect(chooseGenerator()).toBeInstanceOf(ScriptedGenerator)
+  })
+
+  it('nominates nobody, because the coordinator decides the floor alone', () => {
+    expect(chooseBrain().floor).toBeUndefined()
   })
 })

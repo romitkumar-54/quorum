@@ -45,8 +45,10 @@ export class BriefBuilder {
    * the claims decide which interviewer picks the thread up, and the flags are
    * what the coordinator bids on.
    */
-  async ingest(event: TranscriptEvent): Promise<{ brief: Brief; newClaims: Claim[]; newFlags: Flag[] }> {
-    const { claims, flags } = await this.analyzer.analyze(event, this.brief)
+  async ingest(
+    event: TranscriptEvent,
+  ): Promise<{ brief: Brief; newClaims: Claim[]; newFlags: Flag[]; lead?: Competency }> {
+    const { claims, flags, lead } = await this.analyzer.analyze(event, this.brief)
 
     const next: Brief = {
       turn: event.speaker === 'candidate' ? this.brief.turn + 1 : this.brief.turn,
@@ -73,7 +75,7 @@ export class BriefBuilder {
 
     next.scores = score(next)
     this.brief = next
-    return { brief: next, newClaims: claims, newFlags: flags }
+    return { brief: next, newClaims: claims, newFlags: flags, lead }
   }
 
   /** Mark a flag as challenged on the floor, so nobody raises it twice. */

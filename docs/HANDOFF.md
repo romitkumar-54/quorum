@@ -2,6 +2,41 @@
 
 **Written 2026-09-06, at commit `8212c6a`.**
 
+> **Status, later the same day — Phases 1 and 2 are done, and 3.1 builds.**
+>
+> | Item | State |
+> | --- | --- |
+> | 1.1 `AgoraTransport` is used | done · agents are created at Start, not at page load |
+> | 1.2 the grant is a `think` | done · verified live in a browser |
+> | 1.3 transcript from `history` | done · verified live |
+> | 1.4 naive mode on real Agora | done · 4 turns, 4 collisions, 100% — see `docs/AGORA.md` |
+> | 1.5 external LLM retired | done · 9 files deleted, nothing reads `LLM_API_KEY` |
+> | 2.1 one channel per interview | done · two browsers, two channels, both `in channel` |
+> | 2.2 clean up on leave | done · 3 agents RUNNING, tab killed, 0 left |
+> | 2.3 agent dies mid-interview | **written, not seen** · no live `FAILED` was provoked |
+> | 2.4 token renewal | **written, not seen** · needs an interview open past an hour |
+> | 2.5 barge-in live | **not done** · needs a human voice talking over an agent |
+> | 3.1 `npm run build` | passes, exit 0, first run |
+> | 3.1 deploy | **not done** · needs a Vercel login |
+> | 3.2 mic on a real domain | **not done** · needs the deploy |
+>
+> **Found by using it, and fixed:** one interviewer held the floor for the whole
+> interview (the `MAX_CONSECUTIVE` cap only guarded a model's nomination, which
+> 1.5 removed); the microphone died permanently on any non-benign recogniser
+> error, including Chrome's routine `network`; `src/speech/index.ts` was still
+> `en-US` against the 2026-09-05 `en-IN` decision; Agora's `speak` returns before
+> the agent stops talking, which swallowed the `think` after a long line; and the
+> interview opened with no greeting. See `docs/DECISIONS.md`.
+>
+> The classifier that caused the one-speaker interview is fixed as well: each
+> interviewer has its own vocabulary, signals are weighed rather than ordered,
+> and a sentence that points nowhere names nobody.
+>
+> `npx tsc --noEmit` is clean and `npm test` is 89 passing. The count fell from
+> 84 because 1.5 deleted the code 27 of them covered; 18 new ones cover the
+> `think`/`history` path, the collision read-back and the agent-failure path.
+> The 5 `react-hooks/refs` lint errors are unchanged and still pre-existing.
+
 The goal is an end-to-end working site: a candidate opens a URL, talks, three
 Agora interviewers question them one at a time, and a structured assessment
 comes out. This file is the complete remaining technical work to get there.

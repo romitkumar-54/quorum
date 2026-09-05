@@ -145,8 +145,11 @@ Both directions are needed for the demo to survive a judge talking over it:
 | Managed ASR + LLM + TTS, no external keys | **Real.** Verified at join. |
 | `think` / `speak` / `interrupt` / `history` / `leave` | **Real.** All return 200 against the live API. |
 | Per-join token minting | **Real.** |
-| Coordinator, brief, analysis, metrics, report | **Real.** Framework-free TypeScript, 84 tests. |
-| Browser joins the RTC channel and you hear it | **Not yet.** The route mints the candidate token; the Web SDK join is the next piece. |
+| Coordinator, brief, analysis, metrics, report | **Real.** Framework-free TypeScript, 89 tests. |
+| Browser joins the RTC channel and you hear it | **Real.** uid 1000, mic published, header reads `in channel`. |
+| The panel's words come from Agora, not from us | **Real.** `think` grants the floor, `history` reads the line back. |
+| Naive mode as a real Agora collision | **Real.** Run live 2026-09-06; three agents, one channel, output below. |
+| A channel per interview | **Real.** Two browsers open at once get two channels and two panels. |
 
 One run of the panel, through the app's own API, unedited:
 
@@ -173,6 +176,38 @@ second turn -- coordinator moves the floor to: product
 
 Two turns, two speakers, one voice each time, and both questions written by
 Agora's managed model rather than by us.
+
+## The control condition, run live
+
+Naive mode had never been run against Agora until 2026-09-06. It is not a
+simulation of a collision and it does not need to be exaggerated — with
+`remote_rtc_uids: ["1000"]` all three agents subscribe to the candidate, all
+three detect the same end of speech, and all three answer. Unedited, one turn:
+
+```
+remote_rtc_uids [1000] · idle_timeout 120 · nothing deciding
+
+candidate  (speaks)
+
+  00:17  technical    "Please pick a specific problem you'd like to solve so
+                       we can assess your approach."
+  00:17  product      "Can you tell me how you quantified the impact your work
+                       had on the users or customers involved?"
+  00:17  behavioural  "I notice you've not responded yet; can you describe a
+                       time when you had to explain a complex idea clearly?"
+
+  00:20  all three again
+
+metrics:  turns 4 · collisions 4 · collision rate 100%
+```
+
+Three different questions, three voices, one instant. Every line was written by
+that agent's own managed model, and the transcript above was read back out of
+`GET .../history` rather than composed here — a collision nobody can hear is
+just an assertion.
+
+The same channel with `remote_rtc_uids: ["1099"]` gives exactly one voice per
+turn. That is the A/B, and both halves are real Agora joins.
 
 ## Running it
 
