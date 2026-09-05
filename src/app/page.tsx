@@ -26,6 +26,8 @@ import { EMPTY_METRICS, type Metrics } from '@/core/metrics'
 import type { Assessment } from '@/core/brief'
 import { SimulatedTransport } from '@/transport/simulated'
 import { AgoraTransport } from '@/transport/agora'
+import { ScriptedGenerator, type QuestionGenerator } from '@/agents'
+import { chooseGenerator } from '@/agents/choose'
 import { CandidateEar } from '@/speech'
 import { SourceRack, type SourceView } from '@/components/SourceRack'
 import { BriefPanel, FloorStrip, Meters, TranscriptFeed } from '@/components/Panels'
@@ -46,6 +48,8 @@ export default function Gallery() {
   const sessionRef = useRef<InterviewSession | null>(null)
   const transportRef = useRef<SimulatedTransport | null>(null)
   const earRef = useRef<CandidateEar | null>(null)
+  /** The brain chosen at startup, restored after the rehearsed demo borrows it. */
+  const generatorRef = useRef<QuestionGenerator>(new ScriptedGenerator())
   /** The microphone callback needs the live value, not the one captured at start(). */
   const busyRef = useRef(false)
 
@@ -66,6 +70,7 @@ export default function Gallery() {
   const [notice, setNotice] = useState<string | null>(null)
   const [voiceSupported, setVoiceSupported] = useState(false)
   const [agoraLive, setAgoraLive] = useState(false)
+  const [llmLive, setLlmLive] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -89,6 +94,18 @@ export default function Gallery() {
 
     // If the server holds Agora credentials, say so rather than overselling.
     AgoraTransport.isConfigured().then(setAgoraLive)
+
+    // Same for the model: with no key the panel runs on the scripted ladder,
+    // and the header says so rather than implying questions are being written.
+    fetch('/api/interviewer')
+      .then((res) => res.json())
+      .then((body: { configured?: boolean }) => {
+        const configured = body.configured === true
+        setLlmLive(configured)
+        generatorRef.current = chooseGenerator(configured)
+        sessionRef.current?.setGenerator(generatorRef.current)
+      })
+      .catch(() => setLlmLive(false))
   }, [])
 
   const refresh = useCallback(() => {
@@ -215,6 +232,9 @@ export default function Gallery() {
     setBusy(true)
     setAssessment(null)
     earRef.current?.mute()
+    // The rehearsal has to be identical every time it runs, so it borrows the
+    // deterministic panel even when a key is present.
+    session.setGenerator(new ScriptedGenerator())
     try {
       for (let i = demoIndex; i < DEMO_TRANSCRIPT.length; i++) {
         const turn = DEMO_TRANSCRIPT[i]
@@ -224,6 +244,7 @@ export default function Gallery() {
       }
       setAssessment(session.assessment())
     } finally {
+      session.setGenerator(generatorRef.current)
       earRef.current?.unmute()
       busyRef.current = false
       setBusy(false)
@@ -298,7 +319,8 @@ export default function Gallery() {
       <header className="strip">
         <span className="wordmark">Quorum</span>
         <span className="strip-meta">
-          {DEFAULT_CHANNEL.channelName} · remote_rtc_uids &quot;*&quot; · {agoraLive ? 'agora' : 'simulated'}
+          {DEFAULT_CHANNEL.channelName} · remote_rtc_uids &quot;*&quot; · {agoraLive ? 'agora' : 'simulated'} ·{' '}
+          {llmLive ? 'live questions' : 'scripted'}
         </span>
         <span className="strip-spacer" />
         <span className="disclosure">

@@ -169,6 +169,14 @@ export class InterviewSession {
     this.coordinator.mode = mode
   }
 
+  /**
+   * Swap the brain. Used once at startup when the key probe answers, and by the
+   * rehearsed demo to force the deterministic panel for its duration.
+   */
+  setGenerator(generator: QuestionGenerator): void {
+    this.generator = generator
+  }
+
   reset(mode: ChannelMode = this.coordinator.mode): void {
     this.transcript.clear()
     this.brief.reset()
