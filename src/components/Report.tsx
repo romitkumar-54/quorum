@@ -15,7 +15,7 @@ export function Report({ assessment }: { assessment: Assessment }) {
   return (
     <section className="report">
       <div className="report-head">
-        <h2>Panel assessment</h2>
+        <h2>Interview evidence review</h2>
         <span className="column-note">every row traced to a timestamp</span>
       </div>
       <p className="report-summary">{assessment.summary}</p>
@@ -27,7 +27,7 @@ export function Report({ assessment }: { assessment: Assessment }) {
               {AGENTS[verdict.agent].displayName}
               <span className="verdict-competency">{verdict.competency}</span>
             </div>
-            <div className="verdict-score">{verdict.score}/5</div>
+            <div className="verdict-score">{verdict.score === null ? 'Not assessed' : `${verdict.score}/5`}</div>
             <div className="verdict-text">{verdict.verdict}</div>
 
             {verdict.evidence.length > 0 && (
@@ -46,14 +46,14 @@ export function Report({ assessment }: { assessment: Assessment }) {
 
       <div className="final" data-split={assessment.split}>
         <div className="verdict-name">Final</div>
-        <div className="verdict-score">{assessment.final}/5</div>
+        <div className="verdict-score">{assessment.final === null ? 'Insufficient evidence' : `${assessment.final}/5`}</div>
         <div className="verdict-text">
-          {assessment.split ? (
+          {assessment.final === null ? 'Answer questions in all three areas to receive an overall evidence score.' : assessment.split ? (
             <span className="final-flag">
-              Flagged: split panel, {assessment.spread} points apart. No single-agent system produces this row.
+              Evidence scores differ by {assessment.spread} points across areas.
             </span>
           ) : (
-            'The panel agreed.'
+            'Provisional rubric score. Review the evidence for each area.'
           )}
         </div>
       </div>

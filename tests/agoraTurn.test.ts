@@ -348,3 +348,42 @@ describe('the simulator is left exactly as it was', () => {
     expect(step.utterances[0].speaker).toBe('technical')
   })
 })
+
+describe('transcript and cancellation regressions', () => {
+  it('recognizes a new turn when history has rolled over without growing', async () => {
+    const transport = new FakeAgora({ technical: ['New question'] })
+    transport.seed('technical', 'Old question')
+    const original = transport.history.bind(transport)
+    transport.history = async agent => (await original(agent)).slice(-1)
+    const session = new InterviewSession({transport, floor: picks('technical'), ...fast})
+    const result = await session.candidateSays('I used a hash map.')
+    expect(result.utterances[0].text).toBe('New question')
+  })
+  it('publishes the candidate transcript before waiting for an interviewer', async () => {
+    const transport = new FakeAgora({technical: ['New question']})
+    const snapshots: string[][] = []
+    const session = new InterviewSession({transport, floor: picks('technical'), ...fast,
+      onTranscript: () => snapshots.push(session.transcript.all().map(e => e.text)),
+    })
+    await session.candidateSays('I used a hash map.')
+    expect(snapshots[0]).toEqual(['I used a hash map.'])
+    expect(snapshots.at(-1)).toContain('New question')
+  })
+  it('does not speak a late fallback after the user ends an interview', async () => {
+    const transport = new FakeAgora({})
+    const session = new InterviewSession({transport, floor: picks('technical'), ...fast})
+    transport.think = async () => session.cancel()
+    await expect(session.candidateSays('I used a hash map.')).rejects.toThrow('Interview ended')
+    expect(transport.spoken).toHaveLength(0)
+    expect(session.transcript.all()).toHaveLength(1)
+  })
+  it('waits for actual audio completion before handing the microphone back', async () => {
+    const transport = new FakeAgora({technical: ['New question']})
+    let completed = false
+    const session = new InterviewSession({transport, floor: picks('technical'), ...fast,
+      waitForAudio: async () => { completed = true },
+    })
+    await session.candidateSays('I used a hash map.')
+    expect(completed).toBe(true)
+  })
+})

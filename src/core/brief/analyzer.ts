@@ -172,6 +172,7 @@ export class RuleAnalyzer implements Analyzer {
         topic,
         stance,
         specific,
+        relevant: pointed,
       }
       claims.push(claim)
 

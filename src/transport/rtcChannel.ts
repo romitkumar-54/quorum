@@ -87,6 +87,24 @@ export class RtcChannel {
     return this.joinedChannel
   }
 
+  /** Publication persists between sentences. Inspect actual audio energy. */
+  async waitForSilence(uid: number, text: string): Promise<void> {
+    const started = Date.now()
+    let lastAudio = started
+    let heardAudio = false
+    const estimated = Math.max(2000, text.trim().split(/\s+/).length * 400)
+    while (this.joined && Date.now() - started < Math.min(60_000, estimated + 15_000)) {
+      const track = this.client?.remoteUsers.find(user => Number(user.uid) === uid)?.audioTrack
+      if ((track?.getVolumeLevel() ?? 0) > 0.02) {
+        lastAudio = Date.now()
+        heardAudio = true
+      }
+      if (heardAudio && Date.now() - lastAudio > 1200) return
+      if (!heardAudio && Date.now() - started > estimated + 1500) return
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  }
+
   /** Which interviewer uids are publishing audio right now. */
   get speakingUids(): number[] {
     return [...this.speaking]
@@ -109,10 +127,12 @@ export class RtcChannel {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'token', channelName }),
+        signal: AbortSignal.timeout(10_000),
       })
       grant = (await res.json()) as TokenGrant
     } catch (error) {
       this.fail(error instanceof Error ? error.message : 'could not reach the token route')
+      this.claimed = false
       return false
     }
 
@@ -120,6 +140,7 @@ export class RtcChannel {
       // No credentials on the server. The app stays on the simulated path, and
       // the header keeps saying so rather than pretending.
       this.fail(grant.error ?? 'the server is not holding Agora credentials')
+      this.claimed = false
       return false
     }
 
@@ -131,10 +152,14 @@ export class RtcChannel {
 
       client.on('user-published', async (user, mediaType) => {
         if (mediaType !== 'audio') return
-        await client.subscribe(user, mediaType)
+        try {
+          await client.subscribe(user, mediaType)
         // An interviewer's voice. Play it: this is the panel being heard.
         user.audioTrack?.play()
         this.markSpeaking(user, true)
+        } catch {
+          this.fail('Could not play interviewer audio. Check your connection and restart the interview.')
+        }
       })
 
       client.on('user-unpublished', (user, mediaType) => {

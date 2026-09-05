@@ -85,6 +85,8 @@ export interface SessionOptions {
    * the worst version of that. This is how it reaches the notice bar.
    */
   onNotice?: (message: string) => void
+  onTranscript?: () => void
+  waitForAudio?: (agent: AgentId, text: string) => Promise<void>
 }
 
 /** Comfortably above MIN_HOLD_MS, so a justified interrupt is not a false one. */
@@ -130,6 +132,13 @@ export class InterviewSession {
    * the turn ended. The count is carried across turns instead.
    */
   private consumed = new Map<AgentId, number>()
+  private cancelled = false
+
+  cancel(): void { this.cancelled = true }
+
+  private assertActive(): void {
+    if (this.cancelled) throw new Error('Interview ended.')
+  }
 
   constructor(private options: SessionOptions = {}) {
     this.transcript = new TranscriptLog(this.clock)
@@ -193,8 +202,11 @@ export class InterviewSession {
   }
 
   async candidateSays(text: string, at?: number): Promise<SessionStep> {
+    this.assertActive()
     const candidateEvent = this.transcript.append({ speaker: 'candidate', text, tStart: at })
+    this.options.onTranscript?.()
     const { brief, lead } = await this.brief.ingest(candidateEvent)
+    this.assertActive()
 
     // The analyst names the lead, rather than this reading it off the first
     // claim. The difference is that the analyst is allowed to name nobody: a
@@ -384,17 +396,27 @@ export class InterviewSession {
     // starts. This is the yield half of the interrupt.
     if (cuttingIn) await transport.interrupt()
 
-    const before = (await transport.history?.(agent))?.length ?? 0
+    this.assertActive()
+    const before = (await transport.history?.(agent)) ?? []
+    this.assertActive()
     await transport.think(agent, candidateText)
     const line = await this.awaitLine(transport, agent, before)
 
-    if (line) return this.append(agent, line.text, at)
+    this.assertActive()
+    if (line) {
+      const event = this.append(agent, line.text, at)
+      await this.options.waitForAudio?.(agent, line.text)
+      this.assertActive()
+      return event
+    }
 
     // Nothing came back in time. Fall back to the deterministic line and say it
     // through the transport, so the transcript still shows what the channel
     // heard rather than a sentence nobody said. Per the 2026-09-05 decision: a
     // duller question beats a visible error mid-interview.
     const fallback = await this.compose(agent, decision, flagIds, false)
+    this.assertActive()
+    await transport.interrupt()
     await this.sayAndWait(transport, agent, fallback)
     return this.append(agent, fallback, at)
   }
@@ -458,8 +480,11 @@ export class InterviewSession {
    * so the clock and the audio agree.
    */
   private async sayAndWait(transport: Transport, agent: AgentId, text: string): Promise<void> {
+    this.assertActive()
     await transport.speak(agent, text)
-    await new Promise((resolve) => setTimeout(resolve, this.speechDuration(text)))
+    if (this.options.waitForAudio) await this.options.waitForAudio(agent, text)
+    else await new Promise((resolve) => setTimeout(resolve, this.speechDuration(text)))
+    this.assertActive()
   }
 
   /**
@@ -473,7 +498,7 @@ export class InterviewSession {
   private async awaitLine(
     transport: Transport,
     agent: AgentId,
-    known: number,
+    known: TransportUtterance[],
   ): Promise<TransportUtterance | null> {
     if (!transport.history) return null
 
@@ -481,9 +506,19 @@ export class InterviewSession {
     const deadline = started + this.lineTimeoutMs
 
     while (Date.now() < deadline) {
+      this.assertActive()
       await new Promise((resolve) => setTimeout(resolve, this.linePollMs))
       const said = await transport.history(agent)
-      if (said.length > known) return said[said.length - 1]
+      const fresh = said.filter(line => !known.some(old => old.turnId === line.turnId && old.text === line.text))
+      if (fresh.length) {
+        // History may be a rolling window or contain multiple chunks per turn.
+        // Wait one poll for a revision, then retain every fresh chunk.
+        await new Promise((resolve) => setTimeout(resolve, this.linePollMs))
+        const latest = await transport.history(agent)
+        const completed = latest.filter(line => !known.some(old => old.turnId === line.turnId && old.text === line.text))
+        const lines = completed.length ? completed : fresh
+        return { ...lines[0], text: [...new Set(lines.map(line => line.text))].join(' ') }
+      }
 
       // A healthy agent takes a few seconds to think and speak, so asking after
       // every poll would double the traffic for nothing. Past that, an agent
@@ -504,12 +539,15 @@ export class InterviewSession {
 
   /** Record a line. Synchronous, so transcript order never follows resolution order. */
   private append(agent: AgentId, text: string, at: number): TranscriptEvent {
-    return this.transcript.append({
+    this.assertActive()
+    const event = this.transcript.append({
       speaker: agent,
       text,
       tStart: at,
       tEnd: at + estimateDuration(text),
     })
+    this.options.onTranscript?.()
+    return event
   }
 
   private async speak(

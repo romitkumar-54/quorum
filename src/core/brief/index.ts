@@ -26,8 +26,6 @@ const DIFFICULTY_MIN = 1
 const DIFFICULTY_MAX = 5
 const SCORE_MIN = 1
 const SCORE_MAX = 5
-/** Every competency starts mid-band and moves only on evidence. */
-const SCORE_BASE = 3
 
 export class BriefBuilder {
   private brief: Brief
@@ -111,41 +109,42 @@ function score(brief: Brief): Record<Competency, number> {
   const out = {} as Record<Competency, number>
 
   for (const competency of COMPETENCIES) {
-    let value = SCORE_BASE
-
-    if (competency === 'algorithms') {
-      // Concrete technique named, complexity reasoned about.
-      const specific = brief.claims.filter((c) => c.competency === 'algorithms' && c.specific).length
-      value += Math.min(2, specific)
-    }
-
-    if (competency === 'impact') {
-      // Asserted that it helped someone, never said who or by how much.
-      value -= brief.flags.filter((f) => f.kind === 'unchallenged_impact').length
-    }
-
-    if (competency === 'communication') {
-      value -= brief.flags.filter((f) => f.kind === 'contradiction').length
-      // A contradiction resolved *towards* precision is still a correction the
-      // candidate volunteered. It costs consistency but earns some credit back.
-      if (hasSelfRevision(brief)) value += 1
-    }
-
-    out[competency] = clamp(value, SCORE_MIN, SCORE_MAX)
+    const claims = relevantClaims(brief, competency)
+    if (!claims.length) { out[competency] = 0; continue }
+    // Score answers, not keyword counts. Repeating a technique or breaking an
+    // answer into many sentences cannot accumulate points.
+    const answers = new Map<string, string[]>()
+    for (const claim of claims) answers.set(claim.sourceEventId, [...(answers.get(claim.sourceEventId) ?? []), claim.text])
+    const unique = [...new Set([...answers.values()].map(parts => parts.join(' ').toLowerCase()))]
+    const values = unique.map(text => rubric(competency, text))
+    out[competency] = clamp(Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10, SCORE_MIN, SCORE_MAX)
   }
 
   return out
 }
 
-/** Did a later claim contradict an earlier one by being *more* specific? */
-function hasSelfRevision(brief: Brief): boolean {
-  return brief.flags.some((f) => {
-    if (f.kind !== 'contradiction' || f.evidence.length < 2) return false
-    const [earlier, later] = f.evidence
-    const earlierClaim = brief.claims.find((c) => c.sourceEventId === earlier.eventId)
-    const laterClaim = brief.claims.find((c) => c.sourceEventId === later.eventId)
-    return !!laterClaim?.specific && !earlierClaim?.specific
-  })
+function relevantClaims(brief: Brief, competency: Competency): Claim[] {
+  return brief.claims.filter(c => c.competency === competency && c.relevant !== false)
+}
+
+/** An explicit evidence rubric, not a judgement of correctness or hiring fitness. */
+function rubric(competency: Competency, text: string): number {
+  if (/\b(?:don't know|do not know|no idea|cannot answer)\b/.test(text)) return 1
+  const reasoning = /\b(?:because|therefore|so that|trade.?off|instead|whereas|compared|however|to avoid|so )\b/.test(text)
+  const measured = /\d+(?:\.\d+)?\s*(?:%|percent|ms|seconds?|users?|requests?|revenue|dollars?)/.test(text)
+  const detail = text.split(/\s+/).length >= 18
+  if (competency === 'algorithms') {
+    const method = /hash|cache|index|binary|queue|graph|heap|complexity|o\(|constant time|database|algorithm/.test(text)
+    const validation = /\b(?:tested|tests|benchmark|profil(?:ed|ing)|measured|edge case|load test)\b/.test(text)
+    return 2 + Number(method && detail) + Number(reasoning) + Number(validation && (measured || detail))
+  }
+  if (competency === 'impact') {
+    const comparison = /\b(?:from|baseline|before|after|control|experiment|a\/b|compared)\b/.test(text)
+    return 2 + Number(measured) + Number(reasoning && detail) + Number(measured && comparison)
+  }
+  const action = /\b(?:explained|listened|asked|discussed|agreed|resolved|negotiated|shared|documented|presented)\b/.test(text)
+  const reflection = /\b(?:learned|learnt|next time|feedback|realised|realized|changed|result|resolved)\b/.test(text)
+  return 2 + Number(action && detail) + Number(reasoning) + Number(reflection && detail)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,14 +154,14 @@ function hasSelfRevision(brief: Brief): boolean {
 export interface AgentVerdict {
   agent: AgentId
   competency: Competency
-  score: number
+  score: number | null
   verdict: string
   evidence: Evidence[]
 }
 
 export interface Assessment {
   perAgent: AgentVerdict[]
-  final: number
+  final: number | null
   /** True when the panel does not agree with itself. This is the innovation beat. */
   split: boolean
   spread: number
@@ -180,16 +179,16 @@ export function assess(brief: Brief): Assessment {
     return {
       agent: id,
       competency,
-      score: brief.scores[competency],
+      score: relevantClaims(brief, competency).length ? brief.scores[competency] : null,
       verdict: verdictFor(competency, brief),
       evidence: evidenceFor(competency, brief),
     }
   })
 
-  const values = perAgent.map((v) => v.score)
-  const spread = Math.max(...values) - Math.min(...values)
+  const values = perAgent.map((v) => v.score).filter((v): v is number => v !== null)
+  const spread = values.length ? Math.round((Math.max(...values) - Math.min(...values)) * 10) / 10 : 0
   const split = spread >= SPLIT_THRESHOLD
-  const final = Math.round(values.reduce((a, b) => a + b, 0) / values.length)
+  const final = values.length === COMPETENCIES.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length * 10) / 10 : null
 
   return {
     perAgent,
@@ -197,39 +196,26 @@ export function assess(brief: Brief): Assessment {
     split,
     spread,
     openFlags: brief.flags.filter((f) => !f.addressed),
-    summary: split
-      ? `Panel split by ${spread} points. Reported as a disagreement, not an average.`
-      : 'Panel agreed within one point.',
+    summary: `Provisional evidence review of ${brief.turn} answer${brief.turn === 1 ? '' : 's'}; ${values.length} of 3 areas assessed. Scores reflect specificity, reasoning and supporting detail in your answers. This rules-based rubric does not verify technical correctness. ${values.length < 3 ? 'More evidence is needed before an overall score can be reported.' : split ? `Evidence scores differ by ${spread} points across areas.` : 'Review the supporting quotes and gaps below.'}`,
   }
 }
 
 function verdictFor(competency: Competency, brief: Brief): string {
-  if (competency === 'algorithms') {
-    const specific = brief.claims.filter((c) => c.competency === 'algorithms' && c.specific)
-    return specific.length > 0 ? 'correct, efficient' : 'no concrete technique named'
+  const claims = relevantClaims(brief, competency)
+  if (!claims.length) return 'Not assessed — no relevant answer captured.'
+  const count = new Set(claims.map(c => c.sourceEventId)).size
+  const guidance = {
+    algorithms: 'Explain the approach, trade-offs, and how you tested it. Naming a technique alone does not establish correctness.',
+    impact: 'Identify who benefited, give a before/after measurement, and explain how you attributed the result.',
+    communication: 'Describe your own action, why you took it, the outcome, and what you learned.',
   }
-
-  if (competency === 'impact') {
-    const unchallenged = brief.flags.filter((f) => f.kind === 'unchallenged_impact')
-    return unchallenged.length > 0
-      ? 'never named the user impact'
-      : brief.claims.some((c) => c.competency === 'impact' && c.specific)
-        ? 'impact quantified'
-        : 'impact never discussed'
-  }
-
-  const contradiction = brief.flags.find((f) => f.kind === 'contradiction')
-  if (contradiction) {
-    const topic = brief.claims.find((c) => c.sourceEventId === contradiction.evidence[0]?.eventId)?.topic
-    return `clear, but contradicted themselves on ${topic ?? 'their own account'}`
-  }
-  return 'consistent throughout'
+  return `${count} relevant answer${count === 1 ? '' : 's'} reviewed; evidence score ${brief.scores[competency]}/5. ${guidance[competency]}`
 }
 
 /** Requirement 9 — every judgement links back to the moment it came from. */
 function evidenceFor(competency: Competency, brief: Brief): Evidence[] {
   const fromClaims: Evidence[] = brief.claims
-    .filter((c) => c.competency === competency)
+    .filter((c) => c.competency === competency && c.relevant !== false)
     .map((c) => ({ eventId: c.sourceEventId, t: c.tStart, quote: c.text }))
 
   const relevantFlags: Record<Competency, Flag['kind'][]> = {

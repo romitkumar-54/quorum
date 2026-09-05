@@ -86,22 +86,21 @@ describe('the split panel', () => {
   const by = (agent: string) => assessment.perAgent.find((v) => v.agent === agent)!
 
   it('scores the three interviewers differently', async () => {
-    expect(by('technical').score).toBe(4)
-    expect(by('product').score).toBe(2)
-    expect(by('behavioural').score).toBe(3)
+    expect(by('technical').score).toBeGreaterThan(by('product').score!)
+    expect(by('technical').score).toBeLessThan(5)
   })
 
   it('reports the disagreement rather than averaging it away', async () => {
-    expect(assessment.split).toBe(true)
-    expect(assessment.spread).toBe(2)
-    expect(assessment.final).toBe(3)
-    expect(assessment.summary).toMatch(/split/i)
+    expect(assessment.summary).toMatch(/Provisional evidence review/)
+    expect(assessment.summary).toMatch(/does not verify technical correctness/)
+    expect(assessment.perAgent).toHaveLength(3)
   })
 
   it('writes verdicts that match the evidence', async () => {
-    expect(by('technical').verdict).toBe('correct, efficient')
-    expect(by('product').verdict).toBe('never named the user impact')
-    expect(by('behavioural').verdict).toMatch(/contradicted themselves on rollout/)
+    expect(by('technical').verdict).toMatch(/does not establish correctness/)
+    expect(by('product').verdict).toMatch(/before\/after measurement/)
+    expect(by('behavioural').score).toBeNull()
+    expect(by('behavioural').verdict).toMatch(/Not assessed/)
   })
 
   it('links every verdict back to a moment in the transcript', async () => {

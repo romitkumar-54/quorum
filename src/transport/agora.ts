@@ -38,6 +38,11 @@ export class AgoraTransport implements Transport {
   private channelName = ''
   private connected = false
   private lastError?: string
+  private sessionHandle?: string
+
+  leavePayload() {
+    return { action: 'leave', channelName: this.channelName, sessionHandle: this.sessionHandle }
+  }
 
   status(): TransportStatus {
     return {
@@ -52,7 +57,7 @@ export class AgoraTransport implements Transport {
   /** Is the server holding real credentials? Decides which transport the app uses. */
   static async isConfigured(): Promise<boolean> {
     try {
-      const res = await fetch('/api/agent', { method: 'GET' })
+      const res = await fetch('/api/agent', { method: 'GET', signal: AbortSignal.timeout(10_000) })
       if (!res.ok) return false
       const body = (await res.json()) as { configured?: boolean }
       return body.configured === true
@@ -76,6 +81,7 @@ export class AgoraTransport implements Transport {
     })
 
     this.connected = body.ok === true
+    this.sessionHandle = body.sessionHandle
     this.joined = this.connected ? agents.map((a) => a.agentId) : []
     if (!this.connected) this.lastError = body.error ?? 'Agora join failed.'
     return this.status()
@@ -86,15 +92,15 @@ export class AgoraTransport implements Transport {
    * what we send is the candidate's answer, not a script.
    */
   async think(agent: AgentId, text: string): Promise<void> {
-    await this.post({ action: 'think', channelName: this.channelName, agentId: agent, text })
+    this.requireOK(await this.post({ action: 'think', channelName: this.channelName, agentId: agent, text }))
   }
 
   async speak(agent: AgentId, text: string): Promise<void> {
-    await this.post({ action: 'speak', channelName: this.channelName, agentId: agent, text })
+    this.requireOK(await this.post({ action: 'speak', channelName: this.channelName, agentId: agent, text }))
   }
 
   async interrupt(): Promise<void> {
-    await this.post({ action: 'interrupt', channelName: this.channelName })
+    this.requireOK(await this.post({ action: 'interrupt', channelName: this.channelName }))
   }
 
   async leave(): Promise<void> {
@@ -153,18 +159,24 @@ export class AgoraTransport implements Transport {
 
   private async post(
     payload: unknown,
-  ): Promise<{ ok?: boolean; error?: string; contents?: unknown[] }> {
+  ): Promise<{ ok?: boolean; error?: string; contents?: unknown[]; sessionHandle?: string }> {
     try {
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ ...(payload as object), sessionHandle: this.sessionHandle }),
+        signal: AbortSignal.timeout((payload as {action?: string}).action === 'join' ? 55_000 : 15_000),
       })
+      if (!res.ok) throw new Error(`Interview service returned HTTP ${res.status}. Please try again.`)
       return (await res.json()) as { ok?: boolean; error?: string; contents?: unknown[] }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'network error'
       this.lastError = message
       return { ok: false, error: message }
     }
+  }
+
+  private requireOK(body: {ok?: boolean; error?: string}): void {
+    if (!body.ok) throw new Error(body.error ?? 'The interviewer could not respond. Please try again.')
   }
 }

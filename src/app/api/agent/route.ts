@@ -29,6 +29,14 @@
 
 import { NextResponse } from 'next/server'
 import { RtcRole, RtcTokenBuilder } from 'agora-token'
+import { signAgents, verifyAgents } from '@/core/agentHandle'
+
+export const maxDuration = 60
+
+/** Bound each upstream operation, including response-body reads. */
+const agoraFetch: typeof fetch = (input, init) => fetch(input, {
+  ...init, cache: 'no-store', signal: AbortSignal.timeout(12_000),
+})
 
 const AGORA_BASE = 'https://api.agora.io/api/conversational-ai-agent/v2/projects'
 
@@ -80,15 +88,14 @@ function authHeader(env: AgoraEnv): string {
  * The certificate never leaves the server. Only the minted token does.
  */
 function mintToken(env: AgoraEnv, channel: string, uid: number): string {
-  const expires = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS
   return RtcTokenBuilder.buildTokenWithUid(
     env.appId,
     env.appCertificate,
     channel,
     uid,
     RtcRole.PUBLISHER,
-    expires,
-    expires,
+    TOKEN_TTL_SECONDS,
+    TOKEN_TTL_SECONDS,
   )
 }
 
@@ -125,13 +132,20 @@ export async function GET() {
     llmConfigured: env !== null,
     note: env
       ? 'Agora Conversational AI credentials present. All models Agora-managed.'
-      : 'Set AGORA_APP_ID, AGORA_CUSTOMER_ID and AGORA_CUSTOMER_SECRET to switch the voice layer to Agora.',
+      : 'Set AGORA_APP_ID, AGORA_APP_CERTIFICATE, AGORA_CUSTOMER_ID and AGORA_CUSTOMER_SECRET to switch the voice layer to Agora.',
   })
 }
 
 export async function POST(request: Request) {
   const env = readEnv()
-  const body = (await request.json()) as Record<string, unknown>
+  let body: Record<string, unknown>
+  try {
+    const input = await request.json()
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Invalid request.')
+    body = input
+  } catch {
+    return NextResponse.json({ok: false, error: 'Invalid request body.'}, {status: 400})
+  }
   const action = body.action as string
 
   if (!env) {
@@ -201,10 +215,10 @@ function candidateToken(env: AgoraEnv, body: Record<string, unknown>) {
  */
 async function history(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
-  const instanceId = liveAgents.get(key(channel, body.agentId))
+  const instanceId = verifyAgents(env.appCertificate, channel, body.sessionHandle).find(a => a.agentId === body.agentId)?.instanceId
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
-  const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/history`, {
+  const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/history`, {
     method: 'GET',
     headers: { Authorization: authHeader(env) },
   })
@@ -224,10 +238,10 @@ async function history(env: AgoraEnv, body: Record<string, unknown>) {
  */
 async function agentState(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
-  const instanceId = liveAgents.get(key(channel, body.agentId))
+  const instanceId = verifyAgents(env.appCertificate, channel, body.sessionHandle).find(a => a.agentId === body.agentId)?.instanceId
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
-  const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}`, {
+  const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}`, {
     headers: { Authorization: authHeader(env) },
   })
   const json = (await res.json()) as { status?: string; state?: string; message?: string }
@@ -270,7 +284,7 @@ interface JoinAgent {
  */
 async function sweep(env: AgoraEnv, channel: string): Promise<number> {
   try {
-    const res = await fetch(
+    const res = await agoraFetch(
       `${AGORA_BASE}/${env.appId}/agents?channel=${encodeURIComponent(channel)}&state=1,2&limit=50`,
       { headers: { Authorization: authHeader(env) } },
     )
@@ -283,7 +297,7 @@ async function sweep(env: AgoraEnv, channel: string): Promise<number> {
     const orphans = (json.data?.list ?? json.list ?? []).filter((a) => a.agent_id)
 
     for (const orphan of orphans) {
-      await fetch(`${AGORA_BASE}/${env.appId}/agents/${orphan.agent_id}/leave`, {
+      await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${orphan.agent_id}/leave`, {
         method: 'POST',
         headers: { Authorization: authHeader(env) },
       })
@@ -299,6 +313,11 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
   const naive = body.mode === 'naive'
   const agents = (body.agents ?? []) as JoinAgent[]
+  if (!/^interview-[a-zA-Z0-9-]{1,100}$/.test(channel) || !Array.isArray(agents) || agents.length !== 3 ||
+      new Set(agents.map(a => a.agentId)).size !== 3 ||
+      agents.some(a => !['technical', 'product', 'behavioural'].includes(a.agentId) || typeof a.systemPrompt !== 'string')) {
+    throw new Error('Invalid interview panel.')
+  }
   const results: { agentId: string; instanceId?: string; error?: string }[] = []
 
   // Reclaim the channel before seating a new panel in it.
@@ -362,13 +381,14 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
           config: {
             speech_threshold: 0.5,
             // The coordinator's silence threshold and this value are one knob.
-            end_of_speech: { mode: 'vad', vad_config: { silence_duration_ms: 600 } },
+            end_of_speech: { mode: 'vad', vad_config: { silence_duration_ms: 4000 } },
           },
         },
       },
     }
 
-    const res = await fetch(`${AGORA_BASE}/${env.appId}/join`, {
+    try {
+    const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/join`, {
       method: 'POST',
       headers: { Authorization: authHeader(env), 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -384,10 +404,20 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
         error: json.detail ?? json.message ?? `HTTP ${res.status}`,
       })
     }
+    } catch {
+      results.push({agentId: agent.agentId, error: 'Could not connect to the interviewer service. Please try again.'})
+      // A timed-out join may have succeeded remotely. Reclaim the channel,
+      // including agents whose ids were never delivered to this worker.
+      await sweep(env, channel)
+      break
+    }
   }
 
   const failed = results.filter((r) => r.error)
-  return { ok: failed.length === 0, agents: results, reclaimed, error: failed[0]?.error }
+  const seated = results.filter((r): r is {agentId: string; instanceId: string} => Boolean(r.instanceId))
+  const sessionHandle = signAgents(env.appCertificate, channel, seated)
+  if (failed.length) await leave(env, { channelName: channel, sessionHandle })
+  return { ok: failed.length === 0, agents: results, sessionHandle, reclaimed, error: failed[0]?.error }
 }
 
 /**
@@ -405,10 +435,10 @@ async function join(env: AgoraEnv, body: Record<string, unknown>) {
  */
 async function think(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
-  const instanceId = liveAgents.get(key(channel, body.agentId))
+  const instanceId = verifyAgents(env.appCertificate, channel, body.sessionHandle).find(a => a.agentId === body.agentId)?.instanceId
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
-  const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/think`, {
+  const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/think`, {
     method: 'POST',
     headers: { Authorization: authHeader(env), 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -433,10 +463,10 @@ async function think(env: AgoraEnv, body: Record<string, unknown>) {
  */
 async function speak(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
-  const instanceId = liveAgents.get(key(channel, body.agentId))
+  const instanceId = verifyAgents(env.appCertificate, channel, body.sessionHandle).find(a => a.agentId === body.agentId)?.instanceId
   if (!instanceId) return { ok: false, error: `Agent ${body.agentId} has not joined.` }
 
-  const res = await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/speak`, {
+  const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/speak`, {
     method: 'POST',
     headers: { Authorization: authHeader(env), 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -452,12 +482,13 @@ async function speak(env: AgoraEnv, body: Record<string, unknown>) {
 /** The yield path -- stop the agent that was told to stand down. */
 async function interrupt(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
+  const owned = verifyAgents(env.appCertificate, channel, body.sessionHandle)
   const targets = body.agentId
-    ? agentsIn(channel).filter((a) => a.agentId === String(body.agentId))
-    : agentsIn(channel)
+    ? owned.filter((a) => a.agentId === String(body.agentId))
+    : owned
 
   for (const { instanceId } of targets) {
-    await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/interrupt`, {
+    await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/interrupt`, {
       method: 'POST',
       headers: { Authorization: authHeader(env), 'Content-Type': 'application/json' },
       body: '{}',
@@ -472,14 +503,16 @@ async function interrupt(env: AgoraEnv, body: Record<string, unknown>) {
  */
 async function leave(env: AgoraEnv, body: Record<string, unknown>) {
   const channel = String(body.channelName ?? 'interview-01')
-  for (const { agentId, instanceId } of agentsIn(channel)) {
-    await fetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/leave`, {
+  const results = await Promise.allSettled(verifyAgents(env.appCertificate, channel, body.sessionHandle).map(async ({ agentId, instanceId }) => {
+    const res = await agoraFetch(`${AGORA_BASE}/${env.appId}/agents/${instanceId}/leave`, {
       method: 'POST',
       headers: { Authorization: authHeader(env) },
     })
+    if (!res.ok && res.status !== 404) throw new Error('Could not close an interviewer.')
     liveAgents.delete(key(channel, agentId))
-  }
-  return { ok: true }
+  }))
+  const ok = results.every(result => result.status === 'fulfilled')
+  return { ok, error: ok ? undefined : 'Some interviewers could not be closed. Please retry ending the interview.' }
 }
 
 /**

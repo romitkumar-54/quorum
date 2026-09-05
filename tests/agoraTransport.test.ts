@@ -79,6 +79,19 @@ describe('reading back what an agent said', () => {
 })
 
 describe('the calls the coordinator’s decisions turn into', () => {
+  it('surfaces refused speech instead of claiming it was spoken', async () => {
+    route({ok: false, error: 'Agent has stopped'})
+    await expect(new AgoraTransport().speak('technical', 'A question')).rejects.toThrow('Agent has stopped')
+  })
+
+  it('carries the signed session in subsequent requests and unload cleanup', async () => {
+    const calls = route({ok: true, sessionHandle: 'signed-session'})
+    const transport = new AgoraTransport()
+    await transport.join({channelName: 'interview-test', mode: 'coordinated', remoteRtcUids: ['1099']}, [])
+    await transport.think('technical', 'My answer')
+    expect(calls.at(-1)).toMatchObject({sessionHandle: 'signed-session'})
+    expect(transport.leavePayload()).toMatchObject({sessionHandle: 'signed-session', action: 'leave'})
+  })
   it('grants the floor with think, carrying the candidate’s own words', async () => {
     const calls = route({ ok: true })
 

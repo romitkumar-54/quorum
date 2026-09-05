@@ -119,7 +119,7 @@ export class PanelVoice {
  * the phrase boundary. Tune this in rehearsal: too low and a thinking pause
  * cuts the candidate off.
  */
-export const SILENCE_MS = 1200
+export const SILENCE_MS = 4000
 
 /** How long to wait before retrying a restart the browser refused. */
 const RESTART_RETRY_MS = 250
@@ -159,6 +159,7 @@ export interface EarHandlers {
   /** Live partial text, so the candidate can see they are being heard. */
   onInterim?: (text: string) => void
   onError?: (message: string) => void
+  onListening?: (listening: boolean) => void
 }
 
 type RecognitionCtor = new () => SpeechRecognitionLike
@@ -172,6 +173,7 @@ interface SpeechRecognitionLike extends EventTarget {
   onresult: ((event: SpeechRecognitionResultEventLike) => void) | null
   onerror: ((event: Event) => void) | null
   onend: (() => void) | null
+  onstart: (() => void) | null
 }
 
 interface SpeechRecognitionResultEventLike {
@@ -233,6 +235,7 @@ export class CandidateEar {
   }
 
   start(handlers: EarHandlers): boolean {
+    this.stop()
     const Ctor = recognitionCtor()
     if (!Ctor) {
       handlers.onError?.('This browser has no speech recognition. Use Chrome, or type the answer instead.')
@@ -257,8 +260,15 @@ export class CandidateEar {
     this.resetTurn()
     const recognition = this.recognition
     this.recognition = null
+    this.handlers?.onListening?.(false)
     this.handlers = null
-    recognition?.stop()
+    if (recognition) {
+      recognition.onend = null
+      recognition.onresult = null
+      recognition.onerror = null
+      recognition.onstart = null
+      try { recognition.stop() } catch { /* already ended */ }
+    }
   }
 
   /**
@@ -277,6 +287,27 @@ export class CandidateEar {
   unmute(): void {
     this.deaf = false
     this.resetTurn()
+    // A fresh recogniser removes stale result indices and late panel audio,
+    // and recovers browsers that silently stopped during a long question.
+    if (this.intent) this.restart()
+  }
+
+  /** Submit the assembled answer explicitly, without waiting for silence. */
+  finishTurn(): void {
+    this.clearSilence()
+    if (this.intent && !this.deaf) this.endTurn()
+  }
+
+  private restart(): void {
+    const previous = this.recognition
+    this.recognition = null
+    if (previous) {
+      previous.onresult = previous.onerror = previous.onend = previous.onstart = null
+      try { previous.stop() } catch { /* already ended */ }
+    }
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = null
+    this.reopen()
   }
 
   // ── The recogniser session ────────────────────────────────────────────────
@@ -290,9 +321,21 @@ export class CandidateEar {
         // decision was never carried out, so the browser recogniser went on
         // scoring Indian English against a US model.
     recognition.lang = 'en-IN'
-    recognition.onresult = (event) => this.consume(event)
-    recognition.onerror = (event) => this.onRecognitionError(event)
-    recognition.onend = () => this.reopen()
+    recognition.onstart = () => {
+      if (this.recognition === recognition && this.intent) this.handlers?.onListening?.(true)
+    }
+    recognition.onresult = (event) => {
+      if (this.recognition === recognition && this.intent) this.consume(event)
+    }
+    recognition.onerror = (event) => {
+      if (this.recognition === recognition && this.intent) this.onRecognitionError(event)
+    }
+    recognition.onend = () => {
+      if (this.recognition !== recognition || !this.intent) return
+      this.handlers?.onListening?.(false)
+      this.recognition = null
+      this.reopen()
+    }
 
     this.recognition = recognition
     this.lastFinalIndex = -1
@@ -301,7 +344,9 @@ export class CandidateEar {
       recognition.start()
     } catch {
       // The previous session had not finished releasing the device. Try again.
-      this.retry = setTimeout(() => this.reopen(), RESTART_RETRY_MS)
+      this.failures += 1
+      this.handlers?.onListening?.(false)
+      this.retry = setTimeout(() => this.restart(), RESTART_RETRY_MS + Math.min(this.failures * RESTART_BACKOFF_MS, RESTART_BACKOFF_CAP_MS))
     }
   }
 
@@ -354,13 +399,17 @@ export class CandidateEar {
     // Recoverable: count it so the reopen backs off, and say what happened
     // rather than going quiet while the page still claims to be listening.
     this.failures += 1
+    this.handlers?.onListening?.(false)
     this.handlers?.onError?.(`The microphone dropped out (${code ?? 'unknown'}). Reconnecting…`)
+    // Some browsers emit an error without onend. Do not depend on it.
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = setTimeout(() => this.restart(), RESTART_BACKOFF_CAP_MS)
   }
 
   // ── Turn assembly ─────────────────────────────────────────────────────────
 
   private consume(event: SpeechRecognitionResultEventLike): void {
-    if (this.deaf) return
+    if (this.deaf || !this.intent) return
 
     let interim = ''
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -385,13 +434,14 @@ export class CandidateEar {
 
     // Words are arriving, so whatever went wrong before is over.
     this.failures = 0
+    this.handlers?.onListening?.(true)
 
     this.interimText = interim
     const at = now() - this.origin
     this.turnStart ??= at
     this.lastHeardAt = at
 
-    if (interim) this.handlers?.onInterim?.(interim)
+    this.handlers?.onInterim?.([this.finalText, interim].filter(Boolean).join(' '))
     this.armSilence()
   }
 

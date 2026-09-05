@@ -81,6 +81,8 @@ export interface Claim {
   stance?: string
   /** Did the candidate back this with a number, a unit, or a named technique? */
   specific: boolean
+  /** False for background or unrelated speech that earns no competency score. */
+  relevant?: boolean
 }
 
 export type FlagKind =

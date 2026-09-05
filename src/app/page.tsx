@@ -89,6 +89,7 @@ export default function Gallery() {
   const brainRef = useRef<Brain>(chooseBrain())
   /** The microphone callback needs the live value, not the one captured at start(). */
   const busyRef = useRef(false)
+  const generationRef = useRef(0)
   /** A mute the candidate asked for, which the panel's own muting must not undo. */
   const mutedRef = useRef(false)
 
@@ -96,6 +97,7 @@ export default function Gallery() {
   const [channelName, setChannelName] = useState(DEFAULT_CHANNEL.channelName)
   const [sources, setSources] = useState(idleSources)
   const [decision, setDecision] = useState<FloorDecision | null>(null)
+  const [decisions, setDecisions] = useState<FloorDecision[]>([])
   const [transcript, setTranscript] = useState<readonly TranscriptEvent[]>([])
   const [brief, setBrief] = useState<Brief>(EMPTY_BRIEF)
   const [metrics, setMetrics] = useState<Metrics>(EMPTY_METRICS)
@@ -114,9 +116,11 @@ export default function Gallery() {
   const [agoraLive, setAgoraLive] = useState(false)
   const [rtcJoined, setRtcJoined] = useState(false)
   const [llmLive, setLlmLive] = useState(false)
+  const [ready, setReady] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
+    let active = true
     const channel = channelRef.current || (channelRef.current = newChannelName())
     setChannelName(channel)
 
@@ -139,7 +143,7 @@ export default function Gallery() {
           systemPrompt: buildSystemPrompt(id),
         })),
       )
-      .then(() => setVoiceSupported(true))
+      .then(() => { if (active) setVoiceSupported(true) })
 
     // If the server holds Agora credentials, say so rather than overselling --
     // and if it does, actually join the channel so the candidate is a real
@@ -148,7 +152,8 @@ export default function Gallery() {
     // mount means a fresh join queue per mount, and the two race for uid 1000.
     const rtc = rtcRef.current ?? new RtcChannel()
     rtcRef.current = rtc
-    AgoraTransport.isConfigured().then(async (configured) => {
+    AgoraTransport.isConfigured().then((configured) => {
+      if (!active) return
       setAgoraLive(configured)
       // Every model is Agora-managed and runs inside an agent, so a configured
       // transport is a configured brain. There is no second key to check, and
@@ -158,13 +163,7 @@ export default function Gallery() {
       // because three of them bill $0.10 a minute each from the moment they
       // join and opening the tab must not start the meter.
       agoraReadyRef.current = configured
-      if (!configured) return
-      const ok = await rtc.join(channel, {
-        onError: (message) => setNotice(`RTC: ${message}`),
-      })
-      setRtcJoined(ok)
-      // A join that recovered should not leave a stale failure on screen.
-      if (ok) setNotice(null)
+      setReady(true)
     })
 
     // Closing the tab is the ordinary way an interview ends, and with
@@ -176,7 +175,7 @@ export default function Gallery() {
       if (agoraReadyRef.current && channelRef.current) {
         navigator.sendBeacon?.(
           '/api/agent',
-          new Blob([JSON.stringify({ action: 'leave', channelName: channelRef.current })], {
+          new Blob([JSON.stringify(transportRef.current instanceof AgoraTransport ? transportRef.current.leavePayload() : {})], {
             type: 'application/json',
           }),
         )
@@ -187,6 +186,8 @@ export default function Gallery() {
     window.addEventListener('beforeunload', goodbye)
 
     return () => {
+      active = false
+      sessionRef.current?.cancel()
       window.removeEventListener('pagehide', goodbye)
       window.removeEventListener('beforeunload', goodbye)
       // Leave the channel on unmount. Every agent left sitting in a channel
@@ -202,12 +203,14 @@ export default function Gallery() {
     setTranscript([...session.transcript.all()])
     setBrief(session.brief.current())
     setMetrics(session.metrics())
+    setDecisions([...session.coordinator.log()])
     setYieldedIds(new Set(session.yieldedEventIds()))
   }, [])
 
   // ── Play one candidate turn through the panel ─────────────────────────────
   const play = useCallback(
     async (step: SessionStep) => {
+      const generation = generationRef.current
       const transport = transportRef.current
       if (!transport) return
 
@@ -227,6 +230,7 @@ export default function Gallery() {
       // the agent has already spoken by the time the session returns, and a
       // pause here would just be dead air after the fact.
       if (!transport.generatesOwnLines) await sleep(BID_REVEAL_MS)
+      if (generation !== generationRef.current) return
 
       // 2 — nothing decides, so everybody speaks.
       if (grant.kind === 'collision' && grant.collidedWith) {
@@ -255,6 +259,7 @@ export default function Gallery() {
 
       // 3 — exactly one agent takes the floor, then somebody may cut in.
       for (const [index, utterance] of step.utterances.entries()) {
+        if (generation !== generationRef.current) return
         const speaker = utterance.speaker as AgentId
         const thisDecision = step.decisions[index] ?? grant
         if (index > 0) {
@@ -282,6 +287,7 @@ export default function Gallery() {
         // `think` was the grant, so on Agora this line is already out of the
         // speakers. Saying it again here would say it twice.
         if (!transport.generatesOwnLines) await transport.speak(speaker, utterance.text)
+        if (generation !== generationRef.current) return
         refresh()
       }
 
@@ -300,6 +306,7 @@ export default function Gallery() {
       const session = sessionRef.current
       if (!session || busyRef.current || !text.trim()) return
       busyRef.current = true
+      const generation = generationRef.current
       setBusy(true)
       setAssessment(null)
       setHearing('')
@@ -312,17 +319,35 @@ export default function Gallery() {
         // Three model calls happen in here before anyone speaks. That gap is
         // what `thinking` exists to explain.
         const step = await session.candidateSays(text, at)
+        if (generation !== generationRef.current) return
         setThinking(false)
         await play(step)
+      } catch (error) {
+        if (generation === generationRef.current) {
+          setNotice(error instanceof Error ? error.message : 'The interviewer could not respond. You can continue or retry your answer.')
+          refresh()
+        }
       } finally {
-        setThinking(false)
-        if (!mutedRef.current) earRef.current?.unmute()
-        busyRef.current = false
-        setBusy(false)
+        if (generation === generationRef.current) {
+          setThinking(false)
+          if (!mutedRef.current) earRef.current?.unmute()
+          busyRef.current = false
+          setBusy(false)
+        }
       }
     },
-    [play],
+    [play, refresh],
   )
+
+  const startListening = useCallback(() => {
+    earRef.current?.start({
+      onTurn: heard => { void runTurn(heard.text) },
+      onInterim: setHearing,
+      onListening: setListening,
+      onError: setNotice,
+    })
+    if (busyRef.current || mutedRef.current) earRef.current?.mute()
+  }, [runTurn])
 
   // ── The interview ──────────────────────────────────────────────────────────
   /**
@@ -339,9 +364,17 @@ export default function Gallery() {
     async (forMode: ChannelMode): Promise<Transport | undefined> => {
       const simulated = simulatedRef.current ?? undefined
       if (!agoraReadyRef.current) {
+        setAgoraLive(false)
+        setLlmLive(false)
         transportRef.current = simulated ?? null
         return simulated
       }
+
+      const rtc = rtcRef.current
+      if (!rtc || (!rtc.joined && !await rtc.join(channelRef.current, { onError: setNotice }))) {
+        throw new Error('Could not connect your microphone to the interview. Check browser permission and start again.')
+      }
+      setRtcJoined(true)
 
       const channel = channelFor(forMode, channelRef.current || DEFAULT_CHANNEL.channelName)
       const agora = new AgoraTransport()
@@ -357,10 +390,14 @@ export default function Gallery() {
       if (!status.connected) {
         setNotice(status.note ?? 'Agora would not seat the panel. Running the simulated voices instead.')
         transportRef.current = simulated ?? null
+        setAgoraLive(false)
+        setLlmLive(false)
         return simulated
       }
 
       transportRef.current = agora
+      setAgoraLive(true)
+      setLlmLive(true)
       return agora
     },
     [],
@@ -368,10 +405,16 @@ export default function Gallery() {
 
   const startInterview = useCallback(async () => {
     if (busyRef.current) return
+    busyRef.current = true
+    setBusy(true)
+    const generation = ++generationRef.current
+    const ear = earRef.current
+    try {
 
     setPhase('live')
     setSources(idleSources)
     setDecision(null)
+    setDecisions([])
     setTranscript([])
     setBrief(EMPTY_BRIEF)
     setMetrics(EMPTY_METRICS)
@@ -386,51 +429,61 @@ export default function Gallery() {
     // whatever answered, because the transport decides whether the panel writes
     // its own lines or has them written for it.
     const transport = await openPanel(mode)
+    if (generation !== generationRef.current) {
+      await transport?.leave()
+      return
+    }
 
     // A fresh session: the analyst and the coordinator are constructor options,
     // so the brain cannot be swapped into one that is already running.
-    const session = new InterviewSession({ mode, transport, onNotice: setNotice, ...brainRef.current })
+    const session = new InterviewSession({ mode, transport, onNotice: setNotice, onTranscript: refresh,
+      waitForAudio: (agent, text) => rtcRef.current?.waitForSilence(1001 + AGENT_IDS.indexOf(agent), text) ?? Promise.resolve(),
+      ...brainRef.current })
     sessionRef.current = session
 
     // The microphone opens with the interview and stays open. There is nothing
     // to hold down: an interview is not a walkie-talkie.
-    const ear = earRef.current
-    if (ear && !ear.listening) {
-      const started = ear.start({
-        onTurn: (heard) => void runTurn(heard.text),
-        onInterim: setHearing,
-        onError: (message) => {
-          setNotice(message)
-          setListening(false)
-          setHearing('')
-        },
-      })
-      setListening(started)
-    }
+    startListening()
 
     busyRef.current = true
     setBusy(true)
     setThinking(true)
     ear?.mute()
-    try {
       const step = await session.open()
+      if (generation !== generationRef.current) return
       setThinking(false)
       await play(step)
+    } catch (error) {
+      if (generation === generationRef.current) {
+        setNotice(error instanceof Error ? error.message : 'Could not start the interview. Please try again.')
+        ear?.stop()
+        void transportRef.current?.leave()
+        setPhase('idle')
+      }
     } finally {
-      setThinking(false)
-      if (!mutedRef.current) ear?.unmute()
-      busyRef.current = false
-      setBusy(false)
+      if (generation === generationRef.current) {
+        setThinking(false)
+        if (!mutedRef.current) ear?.unmute()
+        busyRef.current = false
+        setBusy(false)
+      }
     }
-  }, [mode, openPanel, play, runTurn])
+  }, [mode, openPanel, play, startListening, refresh])
 
   const endInterview = useCallback(() => {
+    generationRef.current++
+    sessionRef.current?.cancel()
+    busyRef.current = false
+    setBusy(false)
+    setThinking(false)
     earRef.current?.stop()
-    transportRef.current?.interrupt()
+    void transportRef.current?.interrupt().catch(() => undefined)
     // Send the panel home. With `idle_timeout: 0` an Agora agent never exits on
     // its own, so an interview that is over but not left keeps billing.
     void transportRef.current?.leave()
     transportRef.current = simulatedRef.current
+    void rtcRef.current?.leave()
+    setRtcJoined(false)
     setListening(false)
     setHearing('')
     setPhase('closed')
@@ -444,9 +497,13 @@ export default function Gallery() {
     const next = !mutedRef.current
     mutedRef.current = next
     setMuted(next)
+    void rtcRef.current?.setMicMuted(next).catch(() => setNotice('Could not change the microphone state.'))
     if (next) ear.mute()
-    else if (!busyRef.current) ear.unmute()
-  }, [])
+    else if (!busyRef.current) {
+      if (!ear.listening) startListening()
+      else ear.unmute()
+    }
+  }, [startListening])
 
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
@@ -460,6 +517,7 @@ export default function Gallery() {
       setMode(nextMode)
       setSources(idleSources)
       setDecision(null)
+      setDecisions([])
       setTranscript([])
       setBrief(EMPTY_BRIEF)
       setMetrics(EMPTY_METRICS)
@@ -479,11 +537,11 @@ export default function Gallery() {
     () => ({
       transcript,
       brief,
-      decisions: sessionRef.current?.coordinator.log() ?? [],
+      decisions,
       reportShown: assessment !== null,
       voiceSupported,
     }),
-    [transcript, brief, assessment, voiceSupported],
+    [transcript, brief, decisions, assessment, voiceSupported],
   )
 
   return (
@@ -527,7 +585,7 @@ export default function Gallery() {
         </div>
 
         {phase !== 'live' ? (
-          <button type="button" className="btn" data-primary="true" onClick={startInterview} disabled={busy}>
+          <button type="button" className="btn" data-primary="true" onClick={startInterview} disabled={busy || !ready}>
             {phase === 'closed' ? 'Start another interview' : 'Start interview'}
           </button>
         ) : (
@@ -559,8 +617,10 @@ export default function Gallery() {
                   ? `“${hearing}”`
                   : busy
                     ? 'Microphone off while the panel answers'
-                    : 'Listening…'}
+                    : listening ? 'Listening… Take your time. A 4-second pause sends your answer.' : 'Microphone reconnecting or unavailable — retry or type your answer.'}
           </span>
+          <button type="button" className="btn" disabled={busy || muted || !hearing} onClick={() => earRef.current?.finishTurn()}>Done answering</button>
+          {!listening && !busy && <button type="button" className="btn" onClick={startListening}>Retry microphone</button>}
         </div>
       )}
 
