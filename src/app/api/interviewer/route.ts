@@ -16,6 +16,9 @@ import type { ChatMessage } from '@/agents/prompt'
 
 const url = () => process.env.LLM_URL ?? 'https://api.openai.com/v1/chat/completions'
 const model = () => process.env.LLM_MODEL ?? 'gpt-4o-mini'
+const maxTokens = () => Number(process.env.LLM_MAX_TOKENS) || undefined
+/** Groq's gpt-oss models accept low/medium/high. Left unset for providers that reject it. */
+const reasoningEffort = () => process.env.LLM_REASONING_EFFORT || undefined
 
 export async function GET() {
   return NextResponse.json({
@@ -39,7 +42,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'No messages in the request.' })
     }
 
-    const text = await requestCompletion(messages, { url: url(), apiKey, model: model() })
+    const text = await requestCompletion(messages, {
+      url: url(),
+      apiKey,
+      model: model(),
+      maxTokens: maxTokens(),
+      reasoningEffort: reasoningEffort(),
+    })
     return NextResponse.json({ text })
   } catch (error) {
     return NextResponse.json({

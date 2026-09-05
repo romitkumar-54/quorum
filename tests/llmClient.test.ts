@@ -23,6 +23,36 @@ describe('requesting one interviewer line', () => {
     expect(init.body).not.toContain('sk-secret')
   })
 
+  it('budgets enough tokens for a reasoning model to think and still answer', async () => {
+    // gpt-oss spent 118 of a 120-token budget on hidden reasoning and returned
+    // an empty string. The budget has to cover reasoning plus the question.
+    const fetchImpl = vi.fn().mockResolvedValue(reply('ok'))
+    await requestCompletion(messages, { ...opts, fetchImpl })
+
+    const [, init] = fetchImpl.mock.calls[0]
+    expect(JSON.parse(init.body).max_tokens).toBeGreaterThanOrEqual(600)
+  })
+
+  it('lets the caller set the token budget', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(reply('ok'))
+    await requestCompletion(messages, { ...opts, maxTokens: 2048, fetchImpl })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).max_tokens).toBe(2048)
+  })
+
+  it('omits reasoning_effort unless it was asked for', async () => {
+    // Not every OpenAI-compatible provider accepts it, so it must not be sent
+    // by default.
+    const fetchImpl = vi.fn().mockResolvedValue(reply('ok'))
+    await requestCompletion(messages, { ...opts, fetchImpl })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).not.toHaveProperty('reasoning_effort')
+  })
+
+  it('passes reasoning_effort through when set', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(reply('ok'))
+    await requestCompletion(messages, { ...opts, reasoningEffort: 'low', fetchImpl })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).reasoning_effort).toBe('low')
+  })
+
   it('throws when the provider returns an error status', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response('nope', { status: 429 }))
     await expect(requestCompletion(messages, { ...opts, fetchImpl })).rejects.toThrow(/429/)
