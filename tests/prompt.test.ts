@@ -61,6 +61,29 @@ describe('the prompt carries the reason the floor was granted', () => {
     expect(text).toContain(`Difficulty: ${input.brief.difficulty}`)
   })
 
+  it("puts the candidate's own last words in front of the model", async () => {
+    const input = await inputWithFlag()
+    const said = [...input.transcript].reverse().find((e) => e.speaker === 'candidate')
+    if (!said) throw new Error('the candidate never spoke')
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+    expect(text).toContain('THEY JUST SAID')
+    expect(text).toContain(said.text)
+  })
+
+  it('tells the interviewer to answer what was said when nothing was flagged', async () => {
+    // The old wording here said "ask the next question at this difficulty",
+    // which told the model to ignore the candidate entirely. Off-script answers
+    // came back with generic competency questions.
+    const input = { ...(await inputWithFlag()), justifiedBy: [] }
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+    expect(text).toMatch(/answer what they just said/i)
+    expect(text).toMatch(/off-topic|evasive/i)
+  })
+
   it('sends no more than the last few turns of conversation', async () => {
     const input = await inputWithFlag()
     const text = buildMessages(input)

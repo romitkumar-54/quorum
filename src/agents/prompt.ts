@@ -32,6 +32,8 @@ export function buildMessages(input: GenerationInput): ChatMessage[] {
     .map((e) => `[${formatTimestamp(e.tStart)}] ${e.speaker}: ${e.text}`)
     .join('\n')
 
+  const lastCandidate = [...transcript].reverse().find((e) => e.speaker === 'candidate')
+
   const reason = justifiedBy.length
     ? justifiedBy
         .map((flag) => {
@@ -41,7 +43,7 @@ export function buildMessages(input: GenerationInput): ChatMessage[] {
           return `- ${flag.kind}\n${evidence}`
         })
         .join('\n')
-    : '- nothing specific; ask the next question at this difficulty'
+    : '- nothing was flagged. Answer what they just said: take up its substance and press the weakest part of it. If it is off-topic or evasive, say so plainly and steer them back to the work.'
 
   return [
     { role: 'system', content: buildSystemPrompt(input.agent) },
@@ -54,6 +56,12 @@ export function buildMessages(input: GenerationInput): ChatMessage[] {
         '',
         'RECENT CONVERSATION',
         recent,
+        '',
+        // Anchored on its own line. Buried in the transcript block, an off-script
+        // answer got ignored and the model fell back to generic competency
+        // questions about nothing the candidate had said.
+        'THEY JUST SAID:',
+        lastCandidate ? `"${lastCandidate.text}"` : '(nothing yet)',
         '',
         'YOU HAVE THE FLOOR BECAUSE:',
         reason,
