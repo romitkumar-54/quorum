@@ -86,7 +86,7 @@ export class InterviewSession {
    * Drive one candidate turn all the way through the panel.
    * `at` fixes the utterance start time; otherwise the session clock is used.
    */
-  candidateSays(text: string, at?: number): SessionStep {
+  async candidateSays(text: string, at?: number): Promise<SessionStep> {
     const candidateEvent = this.transcript.append({ speaker: 'candidate', text, tStart: at })
     const { brief, newClaims } = this.brief.ingest(candidateEvent)
 
@@ -105,11 +105,20 @@ export class InterviewSession {
 
     // ── Naive mode: everyone who bid is now talking over everyone else ────────
     if (grant.kind === 'collision' && grant.collidedWith) {
-      for (const agent of grant.collidedWith) {
-        const backing = grant.bids.find((b) => b.agent === agent)?.backedBy ?? []
-        // Nothing lands when three people speak at once, so the flags they were
-        // each reacting to stay open — and the panel collides again next turn.
-        utterances.push(this.speak(agent, grant, grant.tDecision, backing, false))
+      // Nothing lands when three people speak at once, so the flags they were
+      // each reacting to stay open — and the panel collides again next turn.
+      //
+      // The lines are written in parallel because three sequential model calls
+      // would put the panel a full turn behind. They are recorded afterwards,
+      // in bid order, so the transcript never depends on who answered first.
+      const lines = await Promise.all(
+        grant.collidedWith.map((agent) => {
+          const backing = grant.bids.find((b) => b.agent === agent)?.backedBy ?? []
+          return this.compose(agent, grant, backing, false)
+        }),
+      )
+      for (const [index, agent] of grant.collidedWith.entries()) {
+        utterances.push(this.append(agent, lines[index], grant.tDecision))
       }
       return { candidateEvent, brief: this.brief.current(), decisions, utterances }
     }
@@ -118,7 +127,7 @@ export class InterviewSession {
       return { candidateEvent, brief: this.brief.current(), decisions, utterances }
     }
 
-    const holder = this.speak(grant.grantedTo, grant, grant.tDecision, this.coordinator.justification())
+    const holder = await this.speak(grant.grantedTo, grant, grant.tDecision, this.coordinator.justification())
     utterances.push(holder)
 
     // ── Mid-turn: has somebody else got grounds to cut in? ───────────────────
@@ -136,7 +145,7 @@ export class InterviewSession {
       holder.tEnd = tRecheck
       this.yielded.add(holder.id)
       decisions.push(interrupt)
-      utterances.push(this.speak(interrupt.grantedTo, interrupt, tRecheck, this.coordinator.justification()))
+      utterances.push(await this.speak(interrupt.grantedTo, interrupt, tRecheck, this.coordinator.justification()))
     }
 
     this.coordinator.release()
@@ -174,30 +183,42 @@ export class InterviewSession {
    * addressed first, so no two agents challenge the same thing — unless nothing
    * was actually heard, which is what `addressFlags: false` is for.
    */
-  private speak(
+  private async compose(
     agent: AgentId,
     decision: FloorDecision,
-    at: number,
     flagIds: string[],
     addressFlags = true,
-  ): TranscriptEvent {
+  ): Promise<string> {
     const justifiedBy = this.flagsById(flagIds)
     if (addressFlags) this.brief.markAddressed(justifiedBy.map((f) => f.id))
 
-    const text = this.generator.next({
+    return this.generator.next({
       agent,
       brief: this.brief.current(),
       decision,
       justifiedBy,
       transcript: this.transcript.all(),
     })
+  }
 
+  /** Record a line. Synchronous, so transcript order never follows resolution order. */
+  private append(agent: AgentId, text: string, at: number): TranscriptEvent {
     return this.transcript.append({
       speaker: agent,
       text,
       tStart: at,
       tEnd: at + estimateDuration(text),
     })
+  }
+
+  private async speak(
+    agent: AgentId,
+    decision: FloorDecision,
+    at: number,
+    flagIds: string[],
+    addressFlags = true,
+  ): Promise<TranscriptEvent> {
+    return this.append(agent, await this.compose(agent, decision, flagIds, addressFlags), at)
   }
 
   /**

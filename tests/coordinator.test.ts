@@ -1,20 +1,22 @@
-import { describe, expect, it } from 'vitest'
-import { InterviewSession } from '@/core/session'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { InterviewSession, type SessionStep } from '@/core/session'
+import type { QuestionGenerator } from '@/agents'
 import { DEMO_TRANSCRIPT } from '@/core/demo'
 import type { FloorDecision } from '@/core/contracts'
 
 /** Deterministic timings so latency assertions mean something. */
 const fixed = { decisionLatency: () => 50, holdBeforeRecheck: () => 1600 }
 
-function runDemo(mode: 'naive' | 'coordinated') {
+async function runDemo(mode: 'naive' | 'coordinated') {
   const session = new InterviewSession({ mode, ...fixed })
-  const steps = DEMO_TRANSCRIPT.map((t) => session.candidateSays(t.text, t.at))
+  const steps: SessionStep[] = []
+  for (const turn of DEMO_TRANSCRIPT) steps.push(await session.candidateSays(turn.text, turn.at))
   return { session, steps, decisions: session.coordinator.log() }
 }
 
 describe('the invariant: at most one agent holds the floor', () => {
-  it('never grants the floor to more than one agent in coordinated mode', () => {
-    const { decisions } = runDemo('coordinated')
+  it('never grants the floor to more than one agent in coordinated mode', async () => {
+    const { decisions } = await runDemo('coordinated')
     expect(decisions.length).toBeGreaterThan(0)
     for (const d of decisions) {
       expect(d.kind).not.toBe('collision')
@@ -22,7 +24,7 @@ describe('the invariant: at most one agent holds the floor', () => {
     }
   })
 
-  it('holds across randomised sessions', () => {
+  it('holds across randomised sessions', async () => {
     // Utterances chosen to fire every rule: specific, vague, impact,
     // and both sides of two contradiction topics.
     const pool = [
@@ -47,7 +49,7 @@ describe('the invariant: at most one agent holds the floor', () => {
       for (let i = 0; i < turns; i++) {
         x = (x * 1103515245 + 12345) % 2147483647
         t += 5_000 + (x % 20_000)
-        session.candidateSays(pool[Math.abs(x) % pool.length], t)
+        await session.candidateSays(pool[Math.abs(x) % pool.length], t)
       }
 
       for (const d of session.coordinator.log()) {
@@ -63,21 +65,28 @@ describe('the invariant: at most one agent holds the floor', () => {
 })
 
 describe('naive mode reproduces the problem', () => {
-  it('collides when every agent hears the same silence', () => {
-    const { decisions } = runDemo('naive')
+  it('collides when every agent hears the same silence', async () => {
+    const { decisions } = await runDemo('naive')
     const collisions = decisions.filter((d) => d.kind === 'collision')
     expect(collisions.length).toBeGreaterThan(0)
     expect(collisions[0].collidedWith!.length).toBeGreaterThan(1)
   })
 
-  it('reports a non-zero collision rate, where coordinated reports zero', () => {
-    expect(runDemo('naive').session.metrics().collisionRate).toBeGreaterThan(0)
-    expect(runDemo('coordinated').session.metrics().collisionRate).toBe(0)
+  it('reports a non-zero collision rate, where coordinated reports zero', async () => {
+    expect((await runDemo('naive')).session.metrics().collisionRate).toBeGreaterThan(0)
+    expect((await runDemo('coordinated')).session.metrics().collisionRate).toBe(0)
   })
 })
 
 describe('the demo beat', () => {
-  const { steps, decisions } = runDemo('coordinated')
+  let steps: SessionStep[]
+  let decisions: readonly FloorDecision[]
+
+  beforeAll(async () => {
+    const demo = await runDemo('coordinated')
+    steps = demo.steps
+    decisions = demo.decisions
+  })
 
   it('grants turn one to Technical, on the technical claim', () => {
     expect(decisions[0].kind).toBe('grant')
@@ -114,5 +123,26 @@ describe('the demo beat', () => {
     const behavioural = steps[2].utterances.find((u) => u.speaker === 'behavioural')
     expect(behavioural?.text).toMatch(/02:14/)
     expect(behavioural?.text).toMatch(/04:07/)
+  })
+})
+
+describe('lines are generated in parallel but recorded in order', () => {
+  it('appends a collision in bid order even when the lines resolve out of order', async () => {
+    // technical resolves last. If the transcript followed resolution order
+    // rather than bid order, this is where it would show.
+    const slow: QuestionGenerator = {
+      async next({ agent }) {
+        await new Promise((resolve) => setTimeout(resolve, agent === 'technical' ? 20 : 1))
+        return `line from ${agent}`
+      },
+    }
+
+    const session = new InterviewSession({ mode: 'naive', generator: slow, ...fixed })
+    const steps: SessionStep[] = []
+    for (const turn of DEMO_TRANSCRIPT) steps.push(await session.candidateSays(turn.text, turn.at))
+
+    const collided = steps.find((s) => s.decisions[0]?.kind === 'collision' && s.decisions[0].collidedWith)
+    expect(collided).toBeDefined()
+    expect(collided!.utterances.map((u) => u.speaker)).toEqual(collided!.decisions[0].collidedWith)
   })
 })

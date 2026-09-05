@@ -191,7 +191,7 @@ export default function Gallery() {
       // candidate's next answer.
       earRef.current?.mute()
       try {
-        await play(session.candidateSays(text, at))
+        await play(await session.candidateSays(text, at))
       } finally {
         earRef.current?.unmute()
         busyRef.current = false
@@ -219,7 +219,7 @@ export default function Gallery() {
       for (let i = demoIndex; i < DEMO_TRANSCRIPT.length; i++) {
         const turn = DEMO_TRANSCRIPT[i]
         setDemoIndex(i + 1)
-        await play(session.candidateSays(turn.text, turn.at))
+        await play(await session.candidateSays(turn.text, turn.at))
         await sleep(400)
       }
       setAssessment(session.assessment())

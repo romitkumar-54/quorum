@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { InterviewSession } from '@/core/session'
 import { DEMO_TRANSCRIPT } from '@/core/demo'
 import { BriefBuilder } from '@/core/brief'
@@ -76,9 +76,13 @@ describe('difficulty adjusts to performance', () => {
 })
 
 describe('the split panel', () => {
-  const session = new InterviewSession({ mode: 'coordinated', ...fixed })
-  DEMO_TRANSCRIPT.forEach((t) => session.candidateSays(t.text, t.at))
-  const assessment = session.assessment()
+  let assessment: ReturnType<InterviewSession['assessment']>
+
+  beforeAll(async () => {
+    const session = new InterviewSession({ mode: 'coordinated', ...fixed })
+    for (const turn of DEMO_TRANSCRIPT) await session.candidateSays(turn.text, turn.at)
+    assessment = session.assessment()
+  })
   const by = (agent: string) => assessment.perAgent.find((v) => v.agent === agent)!
 
   it('scores the three interviewers differently', () => {
@@ -115,22 +119,22 @@ describe('metrics', () => {
     expect(percentile([], 50)).toBe(0)
   })
 
-  it('counts an interrupt that lands after a fair hold as legitimate', () => {
+  it('counts an interrupt that lands after a fair hold as legitimate', async () => {
     const session = new InterviewSession({ mode: 'coordinated', ...fixed })
-    DEMO_TRANSCRIPT.forEach((t) => session.candidateSays(t.text, t.at))
+    for (const turn of DEMO_TRANSCRIPT) await session.candidateSays(turn.text, turn.at)
     const m = session.metrics()
     expect(m.interrupts).toBe(1)
     expect(m.falseInterrupts).toBe(0)
     expect(m.latencyP50).toBe(50)
   })
 
-  it('counts an interrupt that cuts somebody off instantly as a false one', () => {
+  it('counts an interrupt that cuts somebody off instantly as a false one', async () => {
     const session = new InterviewSession({
       mode: 'coordinated',
       decisionLatency: () => 50,
       holdBeforeRecheck: () => 200, // well inside MIN_HOLD_MS
     })
-    DEMO_TRANSCRIPT.forEach((t) => session.candidateSays(t.text, t.at))
+    for (const turn of DEMO_TRANSCRIPT) await session.candidateSays(turn.text, turn.at)
     const m = session.metrics()
     expect(m.falseInterrupts).toBe(1)
     expect(m.falseInterruptRate).toBe(1)

@@ -21,7 +21,7 @@ export interface GenerationInput {
 }
 
 export interface QuestionGenerator {
-  next(input: GenerationInput): string
+  next(input: GenerationInput): Promise<string>
 }
 
 /**
@@ -29,7 +29,7 @@ export interface QuestionGenerator {
  * and every sentence is traceable to a flag or to the current difficulty.
  */
 export class ScriptedGenerator implements QuestionGenerator {
-  next({ agent, brief, justifiedBy }: GenerationInput): string {
+  async next({ agent, brief, justifiedBy }: GenerationInput): Promise<string> {
     const flag = justifiedBy[0]
 
     if (flag?.kind === 'unchallenged_impact') {
