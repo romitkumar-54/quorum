@@ -21,13 +21,13 @@ import {
   type TranscriptEvent,
 } from '@/core/contracts'
 import { InterviewSession, type SessionStep } from '@/core/session'
-import { DEMO_TRANSCRIPT } from '@/core/demo'
 import { EMPTY_METRICS, type Metrics } from '@/core/metrics'
 import type { Assessment } from '@/core/brief'
 import { SimulatedTransport } from '@/transport/simulated'
 import { AgoraTransport } from '@/transport/agora'
-import { ScriptedGenerator, type QuestionGenerator } from '@/agents'
-import { chooseGenerator } from '@/agents/choose'
+import { ScriptedGenerator } from '@/agents'
+import { chooseBrain, type Brain } from '@/agents/choose'
+import { RuleAnalyzer } from '@/core/brief/analyzer'
 import { CandidateEar } from '@/speech'
 import { SourceRack, type SourceView } from '@/components/SourceRack'
 import { BriefPanel, FloorStrip, Meters, TranscriptFeed } from '@/components/Panels'
@@ -41,6 +41,9 @@ const idleSources = (): Record<AgentId, SourceView> =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** idle: nothing has happened. live: the microphone is open. closed: the report is out. */
+type Phase = 'idle' | 'live' | 'closed'
+
 /** Long enough for a judge to watch the bids land before the floor is granted. */
 const BID_REVEAL_MS = 550
 
@@ -48,10 +51,12 @@ export default function Gallery() {
   const sessionRef = useRef<InterviewSession | null>(null)
   const transportRef = useRef<SimulatedTransport | null>(null)
   const earRef = useRef<CandidateEar | null>(null)
-  /** The brain chosen at startup, restored after the rehearsed demo borrows it. */
-  const generatorRef = useRef<QuestionGenerator>(new ScriptedGenerator())
+  /** The thinking parts, chosen once the key probe answers. */
+  const brainRef = useRef<Brain>({ analyzer: new RuleAnalyzer(), generator: new ScriptedGenerator() })
   /** The microphone callback needs the live value, not the one captured at start(). */
   const busyRef = useRef(false)
+  /** A mute the candidate asked for, which the panel's own muting must not undo. */
+  const mutedRef = useRef(false)
 
   const [mode, setMode] = useState<ChannelMode>('coordinated')
   const [sources, setSources] = useState(idleSources)
@@ -62,7 +67,9 @@ export default function Gallery() {
   const [assessment, setAssessment] = useState<Assessment | null>(null)
   const [yieldedIds, setYieldedIds] = useState<ReadonlySet<string>>(new Set())
 
-  const [demoIndex, setDemoIndex] = useState(0)
+  const [phase, setPhase] = useState<Phase>('idle')
+  const [thinking, setThinking] = useState(false)
+  const [muted, setMuted] = useState(false)
   const [busy, setBusy] = useState(false)
   const [answer, setAnswer] = useState('')
   const [listening, setListening] = useState(false)
@@ -71,7 +78,6 @@ export default function Gallery() {
   const [voiceSupported, setVoiceSupported] = useState(false)
   const [agoraLive, setAgoraLive] = useState(false)
   const [llmLive, setLlmLive] = useState(false)
-  const [deterministic, setDeterministic] = useState(false)
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -103,8 +109,7 @@ export default function Gallery() {
       .then((body: { configured?: boolean }) => {
         const configured = body.configured === true
         setLlmLive(configured)
-        generatorRef.current = chooseGenerator(configured)
-        sessionRef.current?.setGenerator(generatorRef.current)
+        brainRef.current = chooseBrain(configured)
       })
       .catch(() => setLlmLive(false))
   }, [])
@@ -208,10 +213,16 @@ export default function Gallery() {
       // listening to. Deafen it, or the interviewers come back as the
       // candidate's next answer.
       earRef.current?.mute()
+      setThinking(true)
       try {
-        await play(await session.candidateSays(text, at))
+        // Three model calls happen in here before anyone speaks. That gap is
+        // what `thinking` exists to explain.
+        const step = await session.candidateSays(text, at)
+        setThinking(false)
+        await play(step)
       } finally {
-        earRef.current?.unmute()
+        setThinking(false)
+        if (!mutedRef.current) earRef.current?.unmute()
         busyRef.current = false
         setBusy(false)
       }
@@ -219,39 +230,79 @@ export default function Gallery() {
     [play],
   )
 
-  const nextRehearsedTurn = useCallback(async () => {
-    const turn = DEMO_TRANSCRIPT[demoIndex]
-    if (!turn) return
-    setDemoIndex((n) => n + 1)
-    await runTurn(turn.text, turn.at)
-  }, [demoIndex, runTurn])
+  // ── The interview ──────────────────────────────────────────────────────────
+  const startInterview = useCallback(async () => {
+    if (busyRef.current) return
 
-  const runWholeDemo = useCallback(async () => {
-    const session = sessionRef.current
-    if (!session || busyRef.current) return
+    // A fresh session: the analyst and the coordinator are constructor options,
+    // so the brain cannot be swapped into one that is already running.
+    const session = new InterviewSession({ mode, ...brainRef.current })
+    sessionRef.current = session
+
+    setPhase('live')
+    setSources(idleSources)
+    setDecision(null)
+    setTranscript([])
+    setBrief(EMPTY_BRIEF)
+    setMetrics(EMPTY_METRICS)
+    setAssessment(null)
+    setYieldedIds(new Set())
+    setNotice(null)
+    setHearing('')
+    mutedRef.current = false
+    setMuted(false)
+
+    // The microphone opens with the interview and stays open. There is nothing
+    // to hold down: an interview is not a walkie-talkie.
+    const ear = earRef.current
+    if (ear && !ear.listening) {
+      const started = ear.start({
+        onTurn: (heard) => void runTurn(heard.text),
+        onInterim: setHearing,
+        onError: (message) => {
+          setNotice(message)
+          setListening(false)
+          setHearing('')
+        },
+      })
+      setListening(started)
+    }
+
     busyRef.current = true
     setBusy(true)
-    setAssessment(null)
-    earRef.current?.mute()
-    // The rehearsal thinks for itself, like every other turn. Ticking
-    // "deterministic" borrows the scripted panel instead, so a run in front of
-    // judges plays exactly the way it did in practice.
-    if (deterministic) session.setGenerator(new ScriptedGenerator())
+    setThinking(true)
+    ear?.mute()
     try {
-      for (let i = demoIndex; i < DEMO_TRANSCRIPT.length; i++) {
-        const turn = DEMO_TRANSCRIPT[i]
-        setDemoIndex(i + 1)
-        await play(await session.candidateSays(turn.text, turn.at))
-        await sleep(400)
-      }
-      setAssessment(session.assessment())
+      const step = await session.open()
+      setThinking(false)
+      await play(step)
     } finally {
-      session.setGenerator(generatorRef.current)
-      earRef.current?.unmute()
+      setThinking(false)
+      if (!mutedRef.current) ear?.unmute()
       busyRef.current = false
       setBusy(false)
     }
-  }, [demoIndex, deterministic, play])
+  }, [mode, play, runTurn])
+
+  const endInterview = useCallback(() => {
+    earRef.current?.stop()
+    transportRef.current?.interrupt()
+    setListening(false)
+    setHearing('')
+    setPhase('closed')
+    setAssessment(sessionRef.current?.assessment() ?? null)
+  }, [])
+
+  /** Not push-to-talk. A way to stop transmitting, which a live interview needs. */
+  const toggleMute = useCallback(() => {
+    const ear = earRef.current
+    if (!ear) return
+    const next = !mutedRef.current
+    mutedRef.current = next
+    setMuted(next)
+    if (next) ear.mute()
+    else if (!busyRef.current) ear.unmute()
+  }, [])
 
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
@@ -268,38 +319,13 @@ export default function Gallery() {
       setMetrics(EMPTY_METRICS)
       setAssessment(null)
       setYieldedIds(new Set())
-      setDemoIndex(0)
       setNotice(null)
+      setPhase('idle')
+      mutedRef.current = false
+      setMuted(false)
     },
     [mode],
   )
-
-  // ── Microphone ─────────────────────────────────────────────────────────────
-  const toggleMic = useCallback(() => {
-    const ear = earRef.current
-    if (!ear) return
-
-    if (ear.listening) {
-      ear.stop()
-      setListening(false)
-      setHearing('')
-      return
-    }
-
-    const started = ear.start({
-      // A turn arrives already ended on silence, so it goes straight to the
-      // coordinator down the same path the typed box uses.
-      onTurn: (heard) => void runTurn(heard.text),
-      onInterim: setHearing,
-      onError: (message) => {
-        setNotice(message)
-        setListening(false)
-        setHearing('')
-      },
-    })
-    if (started) setNotice(null)
-    setListening(started)
-  }, [runTurn])
 
   useEffect(() => () => earRef.current?.stop(), [])
 
@@ -313,8 +339,6 @@ export default function Gallery() {
     }),
     [transcript, brief, assessment, voiceSupported],
   )
-
-  const demoDone = demoIndex >= DEMO_TRANSCRIPT.length
 
   return (
     <main className="shell">
@@ -340,7 +364,7 @@ export default function Gallery() {
             type="button"
             data-on={mode === 'coordinated'}
             onClick={() => reset('coordinated')}
-            disabled={busy}
+            disabled={busy || phase === 'live'}
           >
             Coordinator on
           </button>
@@ -349,62 +373,55 @@ export default function Gallery() {
             data-on={mode === 'naive'}
             data-danger="true"
             onClick={() => reset('naive')}
-            disabled={busy}
+            disabled={busy || phase === 'live'}
           >
             Coordinator off
           </button>
         </div>
 
-        {/* The way in. Deliberately never disabled: you must be able to cut the
-            microphone while the panel is mid-sentence. */}
-        <button type="button" className="btn" data-primary="true" onClick={toggleMic}>
-          {listening ? 'Stop microphone' : 'Answer by voice'}
-        </button>
+        {phase !== 'live' ? (
+          <button type="button" className="btn" data-primary="true" onClick={startInterview} disabled={busy}>
+            {phase === 'closed' ? 'Start another interview' : 'Start interview'}
+          </button>
+        ) : (
+          <>
+            <button type="button" className="btn" data-danger="true" onClick={endInterview}>
+              End interview
+            </button>
+            {/* Never disabled. You must be able to stop transmitting even while
+                the panel is mid-sentence. */}
+            <button type="button" className="btn" data-on={muted} onClick={toggleMute}>
+              {muted ? 'Unmute microphone' : 'Mute microphone'}
+            </button>
+          </>
+        )}
 
-        <button type="button" className="btn" onClick={runWholeDemo} disabled={busy || demoDone}>
-          {demoDone ? 'Rehearsal complete' : 'Run rehearsed interview'}
-        </button>
-
-        <label className="toggle" title="Borrow the scripted panel so the rehearsal plays identically every time.">
-          <input
-            type="checkbox"
-            checked={deterministic}
-            onChange={(event) => setDeterministic(event.target.checked)}
-            disabled={busy}
-          />
-          deterministic
-        </label>
-
-        <button type="button" className="btn" onClick={nextRehearsedTurn} disabled={busy || demoDone}>
-          Next turn
-        </button>
-
-        <button
-          type="button"
-          className="btn"
-          onClick={() => setAssessment(sessionRef.current?.assessment() ?? null)}
-          disabled={busy || brief.claims.length === 0}
-        >
-          Close and score
-        </button>
-
-        <button type="button" className="btn" onClick={() => reset()} disabled={busy}>
+        <button type="button" className="btn" onClick={() => reset()} disabled={busy || phase === 'live'}>
           Reset
         </button>
       </div>
 
-      {listening && (
+      {phase === 'live' && (
         <div className="controls">
-          <span className="hearing" data-muted={busy} aria-live="polite">
-            {hearing ? `“${hearing}”` : busy ? 'Microphone off while the panel speaks' : 'Listening…'}
+          <span className="hearing" data-muted={busy || muted} aria-live="polite">
+            {thinking
+              ? 'The panel is thinking…'
+              : muted
+                ? 'Microphone muted'
+                : hearing
+                  ? `“${hearing}”`
+                  : busy
+                    ? 'Microphone off while the panel answers'
+                    : 'Listening…'}
           </span>
         </div>
       )}
 
-      <div className="controls">
-        <form
-          className="field"
-          data-fallback="true"
+      {phase === 'live' && (
+        <div className="controls">
+          <form
+            className="field"
+            data-fallback="true"
           onSubmit={(event) => {
             event.preventDefault()
             const text = answer
@@ -422,8 +439,9 @@ export default function Gallery() {
           <button type="submit" className="btn" disabled={busy || !answer.trim()}>
             Send
           </button>
-        </form>
-      </div>
+          </form>
+        </div>
+      )}
 
       {notice && (
         <div className="controls" style={{ color: 'var(--bid)' }}>

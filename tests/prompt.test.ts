@@ -117,3 +117,26 @@ describe('the opening turn', () => {
     expect(text).toMatch(/not human|are AI|artificial/i)
   })
 })
+
+describe('cutting in', () => {
+  it('tells the interrupting agent what it is talking over', async () => {
+    const base = await inputWithFlag()
+    const input = { ...base, decision: { ...base.decision, kind: 'interrupt' as const } }
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+
+    expect(text).toMatch(/cutting in/i)
+    expect(text).toMatch(/do not repeat/i)
+  })
+
+  it('says nothing about cutting in on an ordinary grant', async () => {
+    const base = await inputWithFlag()
+    const input = { ...base, decision: { ...base.decision, kind: 'grant' as const } }
+    const text = buildMessages(input)
+      .map((m) => m.content)
+      .join(' ')
+
+    expect(text).not.toMatch(/cutting in/i)
+  })
+})

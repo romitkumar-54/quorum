@@ -50,6 +50,21 @@ export function buildMessages(input: GenerationInput): ChatMessage[] {
     .join('\n')
 
   const lastCandidate = [...transcript].reverse().find((e) => e.speaker === 'candidate')
+  const lastAgent = [...transcript].reverse().find((e) => e.speaker !== 'candidate')
+
+  // Two interviewers reached the identical question on the same turn, because
+  // the one cutting in was never told it was cutting in — it saw the same brief
+  // and the same flag and drew the same conclusion. It has to know.
+  const cuttingIn =
+    input.decision.kind === 'interrupt' && lastAgent
+      ? [
+          '',
+          `YOU ARE CUTTING IN over ${lastAgent.speaker}, who is mid-sentence saying:`,
+          `"${lastAgent.text}"`,
+          'Do not repeat their question or rephrase it. You are interrupting because there is',
+          'something they are missing — ask that instead.',
+        ]
+      : []
 
   const reason = justifiedBy.length
     ? justifiedBy
@@ -82,6 +97,7 @@ export function buildMessages(input: GenerationInput): ChatMessage[] {
         '',
         'YOU HAVE THE FLOOR BECAUSE:',
         reason,
+        ...cuttingIn,
         '',
         'Ask your one question now. Speak only the question.',
       ].join('\n'),
