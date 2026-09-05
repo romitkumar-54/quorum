@@ -317,9 +317,11 @@ function buildRationale(name: string, relevant: boolean, flags: Flag[], difficul
     const reason: Record<FlagKind, string> = {
       unchallenged_impact: 'impact claimed but never quantified',
       contradiction: 'the account contradicts itself',
+      evasion: 'the question was answered around, not answered',
+      off_topic: 'the candidate has left the interview',
       vague: 'the answer measures nothing',
     }
-    return `${name} has an open flag — ${reason[f.kind]}.`
+    return `${name} has an open flag — ${reason[f.kind] ?? 'something is unresolved'}.`
   }
   if (relevant) return `${name} owns what the candidate just raised.`
   return `${name} has a level-${difficulty} follow-up ready.`
