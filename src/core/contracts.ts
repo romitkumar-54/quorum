@@ -233,6 +233,19 @@ export const DEFAULT_CHANNEL: ChannelConfig = {
   mode: 'coordinated',
 }
 
+/**
+ * A channel name for one interview.
+ *
+ * `DEFAULT_CHANNEL` is a fixed name, and a fixed name is a single interview
+ * room: the second candidate to arrive is rejected for the uid the first one is
+ * already holding, and if they were not, they would hear each other. The
+ * candidate uid only has to be unique *within* a channel, so a channel per
+ * interview is the whole fix and uid 1000 can stay.
+ */
+export function newChannelName(): string {
+  return `interview-${Math.floor(Math.random() * 1_000_000_000)}`
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent profiles — role, voice and what each one cares about
 // ─────────────────────────────────────────────────────────────────────────────

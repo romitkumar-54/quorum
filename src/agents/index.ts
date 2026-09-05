@@ -27,11 +27,41 @@ export interface QuestionGenerator {
 }
 
 /**
+ * The first thing the candidate hears.
+ *
+ * Four jobs in four sentences: say hello, disclose that the panel is AI —
+ * requirement 11, and far too important to leave to a model's discretion —
+ * warn that three interviewers will take turns so the first handover is not a
+ * surprise, and open with something anybody can start talking about.
+ *
+ * It is a constant because it is spoken rather than generated. A panel that
+ * opened with a cold, specific question felt like an interrogation, and one
+ * that lets a model write its own greeting may not disclose anything at all.
+ *
+ * Agora's `speak` caps text at 512 bytes; this sits comfortably inside that.
+ */
+export const OPENING_LINE = [
+  'Hello, and thanks for making the time today.',
+  'You are speaking with an AI panel rather than with people —',
+  'there are three of us, and we will take it in turns.',
+  'Whenever you are ready, tell us a little about yourself',
+  'and a piece of work you are proud of.',
+].join(' ')
+
+/**
  * Deterministic lines, driven entirely by the brief. No API key, no latency,
  * and every sentence is traceable to a flag or to the current difficulty.
  */
 export class ScriptedGenerator implements QuestionGenerator {
-  async next({ agent, brief, justifiedBy }: GenerationInput): Promise<string> {
+  async next({ agent, brief, justifiedBy, opening }: GenerationInput): Promise<string> {
+    // The first thing anyone hears. It has to greet, it has to disclose that
+    // the panel is not human, and it has to open with something answerable --
+    // walking into a cold specific question is what made this feel abrupt.
+    //
+    // Fixed words, deliberately. This line is spoken rather than generated
+    // precisely so the disclosure cannot drift.
+    if (opening) return OPENING_LINE
+
     const flag = justifiedBy[0]
 
     if (flag?.kind === 'unchallenged_impact') {

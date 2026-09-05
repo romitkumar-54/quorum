@@ -131,6 +131,21 @@ const RESTART_RETRY_MS = 250
  */
 const BENIGN_ERRORS = new Set(['no-speech', 'aborted', 'audio-capture-timeout'])
 
+/**
+ * The only errors that actually mean the microphone is gone.
+ *
+ * Everything else -- `network` above all, which Chrome raises against its own
+ * recognition service on a long session -- is a blip, and `onend` reopens after
+ * it. This set used to be "anything not benign", so a single network hiccup
+ * took the microphone down for the rest of the interview and told the candidate
+ * their permissions were wrong. The page went on saying "Listening…".
+ */
+const FATAL_ERRORS = new Set(['not-allowed', 'service-not-allowed'])
+
+/** Backoff between reopen attempts, so a failing recogniser cannot spin. */
+const RESTART_BACKOFF_MS = 400
+const RESTART_BACKOFF_CAP_MS = 4000
+
 export interface HeardTurn {
   text: string
   /** ms since the recogniser started */
@@ -202,6 +217,8 @@ export class CandidateEar {
   private lastFinalIndex = -1
   private turnStart: number | null = null
   private lastHeardAt = 0
+  /** Consecutive recogniser failures, used to back off the reopen loop. */
+  private failures = 0
 
   get supported(): boolean {
     return recognitionCtor() !== null
@@ -225,6 +242,7 @@ export class CandidateEar {
     this.handlers = handlers
     this.intent = true
     this.deaf = false
+    this.failures = 0
     this.origin = now()
     this.resetTurn()
     this.open(Ctor)
@@ -267,7 +285,11 @@ export class CandidateEar {
     const recognition = new Ctor()
     recognition.continuous = true
     recognition.interimResults = true
-    recognition.lang = 'en-US'
+    // en-IN, per the 2026-09-05 decision. The candidates are Indian, and the
+        // Agora join payload was moved to en-IN at the time; this half of the
+        // decision was never carried out, so the browser recogniser went on
+        // scoring Indian English against a US model.
+    recognition.lang = 'en-IN'
     recognition.onresult = (event) => this.consume(event)
     recognition.onerror = (event) => this.onRecognitionError(event)
     recognition.onend = () => this.reopen()
@@ -295,7 +317,20 @@ export class CandidateEar {
     // Anything still unfinalised dies with the session it belonged to. Keep it:
     // mid-answer, that text is the front half of the candidate's sentence.
     this.commitInterim()
-    this.open(Ctor)
+
+    // A healthy session reopens immediately. One that keeps failing gets a
+    // widening pause, so a recogniser refusing to start cannot spin the tab.
+    const delay = Math.min(this.failures * RESTART_BACKOFF_MS, RESTART_BACKOFF_CAP_MS)
+    if (delay === 0) {
+      this.open(Ctor)
+      return
+    }
+
+    if (this.retry !== null) clearTimeout(this.retry)
+    this.retry = setTimeout(() => {
+      this.retry = null
+      if (this.intent) this.open(Ctor)
+    }, delay)
   }
 
   /** Promote pending interim text to final. It will never be finalised now. */
@@ -307,9 +342,19 @@ export class CandidateEar {
 
   private onRecognitionError(event: Event): void {
     const code = (event as Event & { error?: string }).error
+
+    if (code && FATAL_ERRORS.has(code)) {
+      this.handlers?.onError?.('The microphone is blocked. Allow it in the browser, then start again.')
+      this.stop()
+      return
+    }
+
     if (code && BENIGN_ERRORS.has(code)) return // `onend` will reopen the session
-    this.handlers?.onError?.('Microphone unavailable or permission denied.')
-    this.stop()
+
+    // Recoverable: count it so the reopen backs off, and say what happened
+    // rather than going quiet while the page still claims to be listening.
+    this.failures += 1
+    this.handlers?.onError?.(`The microphone dropped out (${code ?? 'unknown'}). Reconnecting…`)
   }
 
   // ── Turn assembly ─────────────────────────────────────────────────────────
@@ -337,6 +382,9 @@ export class CandidateEar {
     }
 
     if (!this.finalText && !interim) return
+
+    // Words are arriving, so whatever went wrong before is over.
+    this.failures = 0
 
     this.interimText = interim
     const at = now() - this.origin

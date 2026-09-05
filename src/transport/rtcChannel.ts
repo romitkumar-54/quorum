@@ -148,6 +148,23 @@ export class RtcChannel {
         this.handlers.onConnection?.(state)
       })
 
+      // A token is good for an hour and nothing renews it on its own, so a
+      // long interview would simply drop. Agora gives 30 seconds' warning.
+      client.on('token-privilege-will-expire', async () => {
+        try {
+          const res = await fetch('/api/agent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'token', channelName: grant.channel }),
+          })
+          const next = (await res.json()) as TokenGrant
+          if (next.ok && next.token) await client.renewToken(next.token)
+          else this.fail('could not renew the channel token')
+        } catch {
+          this.fail('could not renew the channel token')
+        }
+      })
+
       await client.join(grant.appId, grant.channel, grant.token, grant.uid)
 
       // Publish the microphone. In coordinated mode the agents are deaf and

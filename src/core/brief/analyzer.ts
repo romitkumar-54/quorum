@@ -15,6 +15,17 @@ import type { Brief, Claim, Competency, Flag, TranscriptEvent } from '@/core/con
 export interface AnalysisResult {
   claims: Claim[]
   flags: Flag[]
+  /**
+   * Which interviewer the candidate has just handed something to.
+   *
+   * **Undefined when the turn pointed nowhere** — "I studied computer science
+   * at university" is biography, not a claim on anyone's territory. That is the
+   * honest answer, and it matters: the coordinator gives the owner of the lead
+   * a large relevance bonus, so naming one on a sentence that earned nobody's
+   * attention is what let a single interviewer run an entire interview. With no
+   * lead, fairness decides and the floor moves.
+   */
+  lead?: Competency
 }
 
 export interface Analyzer {
@@ -44,13 +55,36 @@ const QUANTITY =
 const VAGUE_INTENSIFIER =
   /\b(a lot|lots|much|way|far|pretty|really|quite|significantly|substantially|considerably|massively|hugely|better|faster|quicker|smoother|improved|optimi[sz]ed|more efficient)\b/i
 
-/** Language about people the work affected. */
-const IMPACT_LANGUAGE =
-  /\b(users?|customers?|clients?|people|business|revenue|retention|adoption|conversion|experience|for everyone)\b/i
+/**
+ * The three vocabularies, one per interviewer.
+ *
+ * These decide who the candidate has just given something to talk about, so
+ * they are matched by weight rather than by order: the sentence belongs to
+ * whichever territory it points at hardest. All three carry `g` because what
+ * matters is how many signals a sentence carries, not merely that it carries
+ * one. They are only ever used with `String.match`, never `.test`, so the
+ * global flag cannot leave a stale `lastIndex` behind.
+ */
 
-/** Language about how the work was built. */
+/** Language about the people the work affected. Product's territory. */
+const IMPACT_LANGUAGE =
+  /\b(users?|customers?|clients?|people|business|revenue|retention|adoption|conversion|engagement|churn|satisfaction|signups?|growth|impact|experience|for everyone)\b/gi
+
+/** Language about how the work was built. Technical's territory. */
 const ALGORITHM_LANGUAGE =
-  /\b(look-?ups?|scan(?:ning)?|complexity|algorithm|data structure|implement(?:ed|ation)?|query|queries|latency|throughput|performance)\b/i
+  /\b(look-?ups?|scan(?:ning)?|complexity|algorithms?|data structures?|implement(?:ed|ation)?|quer(?:y|ies)|latency|throughput|performance|back-?end|front-?end|databases?|schemas?|migrations?|apis?|endpoints?|servers?|services?|refactor(?:ed|ing)?|bugs?|deploy(?:ed|ment)?|architecture|concurrency|race condition|memory|threads?|pipeline|load)\b/gi
+
+/**
+ * Language about working with other people. Behavioural's territory.
+ *
+ * This vocabulary is the point of the whole change. `communication` used to be
+ * the value returned when nothing else matched, which handed Behavioural the
+ * full relevance weight on almost every ordinary sentence and left the other
+ * two interviewers with nothing to bid on. Behavioural now has to earn a turn
+ * on the same terms as everybody else.
+ */
+const COMMUNICATION_LANGUAGE =
+  /\b(teams?|teammates?|colleagues?|managers?|mentor(?:ed|ing)?|stakeholders?|disagree(?:d|ment|ments)?|conflicts?|argued?|convince[ds]?|persuade[ds]?|explain(?:ed|ing)?|present(?:ed|ing|ation)?|communicat(?:e|ed|ing|ion)|feedback|pushback|deadlines?|pressure|blame[ds]?|apolog(?:y|ised|ized)|learn(?:ed|t|ing)?|taught|mistakes?|failures?|struggled?|collaborat(?:e|ed|ing|ion)|negotiat(?:e|ed|ing|ion)|escalat(?:e|ed|ing|ion)|onboard(?:ed|ing)?|culture|morale|standup|pair(?:ed|ing)?)\b/gi
 
 /**
  * Topics where two answers can contradict each other. A claim is tagged with a
@@ -111,6 +145,8 @@ export class RuleAnalyzer implements Analyzer {
 
     const claims: Claim[] = []
     const flags: Flag[] = []
+    /** The first sentence that actually pointed somewhere sets the lead. */
+    let lead: Competency | undefined
 
     // One utterance can carry several claims — "I used a hash map, so lookups
     // are O(1). It made things a lot faster for users." is a solid technical
@@ -123,7 +159,8 @@ export class RuleAnalyzer implements Analyzer {
 
     for (const sentence of splitSentences(event.text)) {
       const specific = TECHNIQUE.test(sentence) || QUANTITY.test(sentence)
-      const competency = classify(sentence)
+      const { competency, pointed } = classify(sentence)
+      if (pointed && !lead) lead = competency
       const { topic, stance } = detectTopic(sentence)
 
       const claim: Claim = {
@@ -192,7 +229,7 @@ export class RuleAnalyzer implements Analyzer {
       known = [...known, claim]
     }
 
-    return { claims, flags }
+    return { claims, flags, lead }
   }
 }
 
@@ -212,15 +249,39 @@ export function splitSentences(text: string): string[] {
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function classify(text: string): Competency {
-  const impact = IMPACT_LANGUAGE.test(text)
-  const algorithmic = ALGORITHM_LANGUAGE.test(text) || TECHNIQUE.test(text)
+/** How many signals of one vocabulary a sentence carries. */
+function weigh(text: string, vocabulary: RegExp): number {
+  return text.match(vocabulary)?.length ?? 0
+}
 
-  // "It made things a lot faster for users" is impact language wearing a
-  // performance costume — impact wins, because that is the claim being made.
-  if (impact) return 'impact'
-  if (algorithmic) return 'algorithms'
-  return 'communication'
+/**
+ * Whose territory this sentence is in, and whether it is in anyone's.
+ *
+ * Weighed rather than ordered: a sentence goes to whichever interviewer it
+ * points at hardest, so "I rewrote the lookup so the team could ship faster"
+ * is not silently filed under whichever test happened to run first.
+ *
+ * `pointed: false` means no vocabulary matched at all. The claim is still
+ * recorded — it is something the candidate said — but nobody is handed a
+ * relevance bonus for it. Treating "nothing matched" as `communication` is the
+ * bug this replaces: it made Behavioural the owner of all ordinary speech.
+ */
+function classify(text: string): { competency: Competency; pointed: boolean } {
+  const weights: Record<Competency, number> = {
+    impact: weigh(text, IMPACT_LANGUAGE),
+    algorithms: weigh(text, ALGORITHM_LANGUAGE) + (TECHNIQUE.test(text) ? 1 : 0),
+    communication: weigh(text, COMMUNICATION_LANGUAGE),
+  }
+
+  // Ties are broken in this order. Impact first keeps the older reading of "it
+  // made things a lot faster for users" — impact language wearing a
+  // performance costume is still an impact claim. Communication is last
+  // precisely because it used to take everything by default.
+  const order: Competency[] = ['impact', 'algorithms', 'communication']
+  const best = order.reduce((winner, c) => (weights[c] > weights[winner] ? c : winner), order[0])
+
+  if (weights[best] === 0) return { competency: 'communication', pointed: false }
+  return { competency: best, pointed: true }
 }
 
 function detectTopic(text: string): { topic?: string; stance?: string } {

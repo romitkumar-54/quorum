@@ -10,12 +10,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AGENTS,
   AGENT_IDS,
+  CANDIDATE_UID,
   DEFAULT_CHANNEL,
   EMPTY_BRIEF,
+  SILENT_UID,
+  newChannelName,
   type AgentId,
   type Brief,
+  type ChannelConfig,
   type ChannelMode,
   type FloorDecision,
   type TranscriptEvent,
@@ -26,9 +29,9 @@ import type { Assessment } from '@/core/brief'
 import { SimulatedTransport } from '@/transport/simulated'
 import { AgoraTransport } from '@/transport/agora'
 import { RtcChannel } from '@/transport/rtcChannel'
-import { ScriptedGenerator } from '@/agents'
+import type { Transport } from '@/transport/types'
+import { buildSystemPrompt } from '@/agents/personas'
 import { chooseBrain, type Brain } from '@/agents/choose'
-import { RuleAnalyzer } from '@/core/brief/analyzer'
 import { CandidateEar } from '@/speech'
 import { SourceRack, type SourceView } from '@/components/SourceRack'
 import { BriefPanel, FloorStrip, Meters, TranscriptFeed } from '@/components/Panels'
@@ -42,6 +45,20 @@ const idleSources = (): Record<AgentId, SourceView> =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * The channel the panel joins, for one mode.
+ *
+ * `remote_rtc_uids` is the whole argument in one field. Coordinated hands every
+ * agent a uid nobody joins as, so none of them can hear anything and none
+ * self-triggers. Naive hands them the candidate, so all three hear the same
+ * silence and all three answer. Both are real Agora joins.
+ */
+const channelFor = (mode: ChannelMode, channelName: string): ChannelConfig => ({
+  channelName,
+  remoteRtcUids: mode === 'naive' ? [CANDIDATE_UID] : [SILENT_UID],
+  mode,
+})
+
 /** idle: nothing has happened. live: the microphone is open. closed: the report is out. */
 type Phase = 'idle' | 'live' | 'closed'
 
@@ -50,18 +67,33 @@ const BID_REVEAL_MS = 550
 
 export default function Gallery() {
   const sessionRef = useRef<InterviewSession | null>(null)
-  const transportRef = useRef<SimulatedTransport | null>(null)
+  /** Whichever transport the current interview is running on. */
+  const transportRef = useRef<Transport | null>(null)
+  /** Kept aside as the fallback, and as what the idle page runs on. */
+  const simulatedRef = useRef<SimulatedTransport | null>(null)
+  /** Does the server hold all four Agora values? Decided once, at mount. */
+  const agoraReadyRef = useRef(false)
+  /**
+   * This visit's channel. Fixed for the life of the page, because the candidate
+   * joins it at mount and the panel joins the same one at start. Held on a ref
+   * as well as in state so a StrictMode remount does not invent a second one.
+   */
+  const channelRef = useRef('')
   const earRef = useRef<CandidateEar | null>(null)
   /** The candidate's own seat in the RTC channel. Null until Agora is configured. */
   const rtcRef = useRef<RtcChannel | null>(null)
-  /** The thinking parts, chosen once the key probe answers. */
-  const brainRef = useRef<Brain>({ analyzer: new RuleAnalyzer(), generator: new ScriptedGenerator() })
+  /**
+   * The thinking parts that still run here: the brief, and the deterministic
+   * line an agent falls back to. There is nothing to probe for any more.
+   */
+  const brainRef = useRef<Brain>(chooseBrain())
   /** The microphone callback needs the live value, not the one captured at start(). */
   const busyRef = useRef(false)
   /** A mute the candidate asked for, which the panel's own muting must not undo. */
   const mutedRef = useRef(false)
 
   const [mode, setMode] = useState<ChannelMode>('coordinated')
+  const [channelName, setChannelName] = useState(DEFAULT_CHANNEL.channelName)
   const [sources, setSources] = useState(idleSources)
   const [decision, setDecision] = useState<FloorDecision | null>(null)
   const [transcript, setTranscript] = useState<readonly TranscriptEvent[]>([])
@@ -85,7 +117,11 @@ export default function Gallery() {
 
   // ── Join the channel ───────────────────────────────────────────────────────
   useEffect(() => {
+    const channel = channelRef.current || (channelRef.current = newChannelName())
+    setChannelName(channel)
+
     const transport = new SimulatedTransport()
+    simulatedRef.current = transport
     transportRef.current = transport
     sessionRef.current = new InterviewSession({ mode: 'coordinated' })
     earRef.current = new CandidateEar()
@@ -100,7 +136,7 @@ export default function Gallery() {
           // that can start a turn. Naive mode swaps this for the candidate's
           // uid and lets all three fire at once.
           remoteRtcUids: DEFAULT_CHANNEL.remoteRtcUids,
-          systemPrompt: AGENTS[id].role,
+          systemPrompt: buildSystemPrompt(id),
         })),
       )
       .then(() => setVoiceSupported(true))
@@ -114,8 +150,16 @@ export default function Gallery() {
     rtcRef.current = rtc
     AgoraTransport.isConfigured().then(async (configured) => {
       setAgoraLive(configured)
+      // Every model is Agora-managed and runs inside an agent, so a configured
+      // transport is a configured brain. There is no second key to check, and
+      // no fifth credential -- that is the point, not an omission.
+      setLlmLive(configured)
+      // Noted, not acted on. The agents are created when the interview starts,
+      // because three of them bill $0.10 a minute each from the moment they
+      // join and opening the tab must not start the meter.
+      agoraReadyRef.current = configured
       if (!configured) return
-      const ok = await rtc.join(DEFAULT_CHANNEL.channelName, {
+      const ok = await rtc.join(channel, {
         onError: (message) => setNotice(`RTC: ${message}`),
       })
       setRtcJoined(ok)
@@ -123,21 +167,32 @@ export default function Gallery() {
       if (ok) setNotice(null)
     })
 
-    // Same for the model: with no key the panel runs on the scripted ladder,
-    // and the header says so rather than implying questions are being written.
-    fetch('/api/interviewer')
-      .then((res) => res.json())
-      .then((body: { configured?: boolean }) => {
-        const configured = body.configured === true
-        setLlmLive(configured)
-        brainRef.current = chooseBrain(configured)
-      })
-      .catch(() => setLlmLive(false))
+    // Closing the tab is the ordinary way an interview ends, and with
+    // `idle_timeout: 0` an agent never exits on its own -- three of them left
+    // behind bill about $18 an hour until Agora's 72-hour cap. `fetch` during
+    // unload is routinely cancelled, so this goes out as a beacon. It is still
+    // best-effort, which is why the server sweeps the channel on the next join.
+    const goodbye = () => {
+      if (agoraReadyRef.current && channelRef.current) {
+        navigator.sendBeacon?.(
+          '/api/agent',
+          new Blob([JSON.stringify({ action: 'leave', channelName: channelRef.current })], {
+            type: 'application/json',
+          }),
+        )
+      }
+      void rtcRef.current?.leave()
+    }
+    window.addEventListener('pagehide', goodbye)
+    window.addEventListener('beforeunload', goodbye)
 
     return () => {
+      window.removeEventListener('pagehide', goodbye)
+      window.removeEventListener('beforeunload', goodbye)
       // Leave the channel on unmount. Every agent left sitting in a channel
       // bills, and a hot reload should not quietly open a second candidate.
       void rtcRef.current?.leave()
+      void transportRef.current?.leave()
     }
   }, [])
 
@@ -168,7 +223,10 @@ export default function Gallery() {
         }
         return next
       })
-      await sleep(BID_REVEAL_MS)
+      // Only worth pausing on when the words are still ahead of us. On Agora
+      // the agent has already spoken by the time the session returns, and a
+      // pause here would just be dead air after the fact.
+      if (!transport.generatesOwnLines) await sleep(BID_REVEAL_MS)
 
       // 2 — nothing decides, so everybody speaks.
       if (grant.kind === 'collision' && grant.collidedWith) {
@@ -183,9 +241,13 @@ export default function Gallery() {
           }
           return next
         })
-        await Promise.all(
-          step.utterances.map((utterance) => transport.speak(utterance.speaker as AgentId, utterance.text)),
-        )
+        // In naive mode on Agora the three of them are already talking over
+        // each other, on their own. This is only the simulator's collision.
+        if (!transport.generatesOwnLines) {
+          await Promise.all(
+            step.utterances.map((utterance) => transport.speak(utterance.speaker as AgentId, utterance.text)),
+          )
+        }
         setSources(idleSources)
         refresh()
         return
@@ -197,7 +259,10 @@ export default function Gallery() {
         const thisDecision = step.decisions[index] ?? grant
         if (index > 0) {
           setDecision(thisDecision)
-          await transport.interrupt() // the previous speaker stops mid-sentence
+          // On Agora the session already stood the previous speaker down before
+          // it granted the floor. Interrupting again here would cut off the
+          // agent that just took it.
+          if (!transport.generatesOwnLines) await transport.interrupt()
         }
 
         setSources((previous) => {
@@ -214,7 +279,9 @@ export default function Gallery() {
           return next
         })
 
-        await transport.speak(speaker, utterance.text)
+        // `think` was the grant, so on Agora this line is already out of the
+        // speakers. Saying it again here would say it twice.
+        if (!transport.generatesOwnLines) await transport.speak(speaker, utterance.text)
         refresh()
       }
 
@@ -258,13 +325,49 @@ export default function Gallery() {
   )
 
   // ── The interview ──────────────────────────────────────────────────────────
+  /**
+   * Bring the panel into being for this interview.
+   *
+   * With credentials this is three real Agora joins, and it is the moment the
+   * meter starts. Without them the simulated transport is already joined and
+   * running on the browser's own speech engine, and the header keeps saying so.
+   *
+   * A refused join is not a reason to have no interview: it falls back to the
+   * simulator and says why on screen.
+   */
+  const openPanel = useCallback(
+    async (forMode: ChannelMode): Promise<Transport | undefined> => {
+      const simulated = simulatedRef.current ?? undefined
+      if (!agoraReadyRef.current) {
+        transportRef.current = simulated ?? null
+        return simulated
+      }
+
+      const channel = channelFor(forMode, channelRef.current || DEFAULT_CHANNEL.channelName)
+      const agora = new AgoraTransport()
+      const status = await agora.join(
+        channel,
+        AGENT_IDS.map((id) => ({
+          agentId: id,
+          remoteRtcUids: channel.remoteRtcUids,
+          systemPrompt: buildSystemPrompt(id),
+        })),
+      )
+
+      if (!status.connected) {
+        setNotice(status.note ?? 'Agora would not seat the panel. Running the simulated voices instead.')
+        transportRef.current = simulated ?? null
+        return simulated
+      }
+
+      transportRef.current = agora
+      return agora
+    },
+    [],
+  )
+
   const startInterview = useCallback(async () => {
     if (busyRef.current) return
-
-    // A fresh session: the analyst and the coordinator are constructor options,
-    // so the brain cannot be swapped into one that is already running.
-    const session = new InterviewSession({ mode, ...brainRef.current })
-    sessionRef.current = session
 
     setPhase('live')
     setSources(idleSources)
@@ -278,6 +381,16 @@ export default function Gallery() {
     setHearing('')
     mutedRef.current = false
     setMuted(false)
+
+    // Three Agora agents, or the simulator. Either way the session is built on
+    // whatever answered, because the transport decides whether the panel writes
+    // its own lines or has them written for it.
+    const transport = await openPanel(mode)
+
+    // A fresh session: the analyst and the coordinator are constructor options,
+    // so the brain cannot be swapped into one that is already running.
+    const session = new InterviewSession({ mode, transport, onNotice: setNotice, ...brainRef.current })
+    sessionRef.current = session
 
     // The microphone opens with the interview and stays open. There is nothing
     // to hold down: an interview is not a walkie-talkie.
@@ -309,11 +422,15 @@ export default function Gallery() {
       busyRef.current = false
       setBusy(false)
     }
-  }, [mode, play, runTurn])
+  }, [mode, openPanel, play, runTurn])
 
   const endInterview = useCallback(() => {
     earRef.current?.stop()
     transportRef.current?.interrupt()
+    // Send the panel home. With `idle_timeout: 0` an Agora agent never exits on
+    // its own, so an interview that is over but not left keeps billing.
+    void transportRef.current?.leave()
+    transportRef.current = simulatedRef.current
     setListening(false)
     setHearing('')
     setPhase('closed')
@@ -334,6 +451,8 @@ export default function Gallery() {
   const reset = useCallback(
     (nextMode: ChannelMode = mode) => {
       transportRef.current?.interrupt()
+      void transportRef.current?.leave()
+      transportRef.current = simulatedRef.current
       earRef.current?.stop()
       setListening(false)
       setHearing('')
@@ -372,7 +491,7 @@ export default function Gallery() {
       <header className="strip">
         <span className="wordmark">Quorum</span>
         <span className="strip-meta">
-          {DEFAULT_CHANNEL.channelName} · remote_rtc_uids [{DEFAULT_CHANNEL.remoteRtcUids.join(', ')}] ·{' '}
+          {channelName} · remote_rtc_uids [{channelFor(mode, channelName).remoteRtcUids.join(', ')}] ·{' '}
           {agoraLive ? (rtcJoined ? 'agora · in channel' : 'agora') : 'simulated'} ·{' '}
           {llmLive ? 'live questions' : 'scripted'}
         </span>

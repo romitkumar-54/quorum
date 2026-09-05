@@ -1,10 +1,8 @@
 import { ScriptedGenerator, type QuestionGenerator } from '@/agents'
-import { LlmGenerator } from '@/agents/llm'
-import { LlmAnalyst } from '@/agents/analyst'
-import { LlmFloor, type FloorPicker } from '@/agents/floor'
+import type { FloorPicker } from '@/agents/floor'
 import { RuleAnalyzer, type Analyzer } from '@/core/brief/analyzer'
 
-/** The three thinking parts of a turn, chosen together. */
+/** The thinking parts of a turn that still run on this side of the channel. */
 export interface Brain {
   analyzer: Analyzer
   floor?: FloorPicker
@@ -12,23 +10,23 @@ export interface Brain {
 }
 
 /**
- * With a key, every stage is a model call and every stage falls back to the
- * deterministic part it replaced. Without one the whole panel is deterministic,
- * which is a working interview — just a less perceptive one.
+ * Every model in this project is Agora-managed and runs inside an agent, so
+ * there is no longer a choice to make here.
+ *
+ * What is left is deliberate rather than leftover. `RuleAnalyzer` builds the
+ * brief — claims, flags, difficulty — which is what the coordinator ranks bids
+ * on, and none of that involves a model. `ScriptedGenerator` is the line an
+ * agent gets when Agora does not answer in time, and the one the simulated
+ * transport voices when there are no credentials at all.
+ *
+ * `floor` is left undefined: nominating a speaker needed a model in this
+ * process, and the coordinator now decides alone.
  */
-export function chooseBrain(configured: boolean): Brain {
-  if (!configured) {
-    return { analyzer: new RuleAnalyzer(), generator: new ScriptedGenerator() }
-  }
-
-  return {
-    analyzer: new LlmAnalyst({ fallback: new RuleAnalyzer() }),
-    floor: new LlmFloor(),
-    generator: new LlmGenerator({ fallback: new ScriptedGenerator() }),
-  }
+export function chooseBrain(): Brain {
+  return { analyzer: new RuleAnalyzer(), generator: new ScriptedGenerator() }
 }
 
-/** The model when a key exists, the deterministic panel when it does not. */
-export function chooseGenerator(configured: boolean): QuestionGenerator {
-  return chooseBrain(configured).generator
+/** The deterministic panel, which is now the only one this process runs. */
+export function chooseGenerator(): QuestionGenerator {
+  return chooseBrain().generator
 }
