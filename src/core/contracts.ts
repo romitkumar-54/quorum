@@ -196,25 +196,40 @@ export interface FloorDecision {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * `naive` reproduces what happens with no coordinator: every agent subscribes to
- * the whole channel, all three hear the candidate stop at the same instant, and
- * all three speak. `coordinated` is the same channel with a coordinator.
+ * The two channel configurations, and both are real Agora joins.
+ *
+ * `naive` gives every agent the candidate's uid in `remote_rtc_uids`. All three
+ * hear the candidate stop at the same instant, all three of their own models
+ * fire, and all three speak. Nothing decides.
+ *
+ * `coordinated` gives every agent SILENT_UID -- a uid nobody joins as -- so no
+ * agent hears anything and none of them ever self-triggers. The coordinator
+ * reads the transcript, picks one, and sends it a `think`. Exactly one voice
+ * per turn, by construction rather than by luck.
+ *
+ * Agora allows exactly one uid here ("Currently, only one user ID is
+ * supported"), which is what rules out the panel hearing itself.
  */
 export type ChannelMode = 'naive' | 'coordinated'
+
+/** The candidate's RTC identity. Agents are 1001 upward; see the agent route. */
+export const CANDIDATE_UID = '1000'
+/** A uid nobody joins as. Subscribing to it is how an agent is made deaf. */
+export const SILENT_UID = '1099'
 
 export interface ChannelConfig {
   channelName: string
   /**
-   * Agora's per-agent audio subscription. `'*'` means "hear everyone", which is
-   * exactly what makes all three agents fire on the same silence.
+   * Agora's per-agent audio subscription: exactly one uid. The candidate's uid
+   * makes an agent self-triggering; SILENT_UID makes it wait to be asked.
    */
-  remoteRtcUids: '*' | AgentId[]
+  remoteRtcUids: string[]
   mode: ChannelMode
 }
 
 export const DEFAULT_CHANNEL: ChannelConfig = {
   channelName: 'interview-01',
-  remoteRtcUids: '*',
+  remoteRtcUids: [SILENT_UID],
   mode: 'coordinated',
 }
 

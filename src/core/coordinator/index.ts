@@ -1,7 +1,7 @@
 /**
  * LANE B — The coordinator
  *
- * Three agents sit in one RTC channel with `remote_rtc_uids: "*"`, so all three
+ * In naive mode three agents each subscribe to the candidate, so all three
  * hear the candidate stop at the same instant. Without something deciding, all
  * three speak. This module is that something.
  *
@@ -166,7 +166,7 @@ export class Coordinator {
         return this.record({
           kind: 'collision',
           grantedTo: null,
-          reason: `remote_rtc_uids: "*" and no coordinator — ${speakers.length} agents detected the same silence and spoke at once.`,
+          reason: `Every agent subscribed to the candidate and nothing decided — ${speakers.length} agents detected the same silence and spoke at once.`,
           bids,
           tDecision: ctx.tNow,
           latencyMs,

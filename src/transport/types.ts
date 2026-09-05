@@ -25,10 +25,11 @@ import type { AgentId, ChannelConfig } from '@/core/contracts'
 export interface AgentJoinSpec {
   agentId: AgentId
   /**
-   * Whose audio this agent subscribes to. `'*'` means everyone — including the
-   * other two agents, which is precisely why all three fire on one silence.
+   * Whose audio this agent subscribes to — exactly one uid, which is all Agora
+   * allows. The candidate's uid makes the agent fire on its own; SILENT_UID
+   * makes it deaf, so it speaks only when the coordinator sends it a `think`.
    */
-  remoteRtcUids: '*' | string[]
+  remoteRtcUids: string[]
   systemPrompt: string
 }
 
@@ -45,9 +46,29 @@ export interface TransportStatus {
 export interface Transport {
   readonly name: string
   readonly implementation: 'simulated' | 'agora'
+  /**
+   * Whether the agents write their own lines.
+   *
+   * True on Agora: each agent carries an Agora-managed model, so granting the
+   * floor means handing it the candidate's answer and letting it reply. The
+   * words never pass through our process, and the transcript comes back over
+   * the channel.
+   *
+   * False in simulation: there is no model, so the caller composes the line
+   * first and the transport only voices it.
+   */
+  readonly generatesOwnLines: boolean
   status(): TransportStatus
   join(config: ChannelConfig, agents: AgentJoinSpec[]): Promise<TransportStatus>
-  /** Put an agent's audio on the channel. Resolves when it finishes speaking. */
+  /**
+   * Grant the floor: hand one agent the candidate's answer and let its own model
+   * write the reply. This is the dynamic path — the words are Agora's managed
+   * LLM, the choice of who was asked is ours.
+   *
+   * Resolves when the agent has finished speaking.
+   */
+  think(agent: AgentId, text: string): Promise<void>
+  /** Put an exact line on the channel. The scripted path. Resolves when done. */
   speak(agent: AgentId, text: string): Promise<void>
   /** Stop whoever is speaking, immediately. This is barge-in, and the yield path. */
   interrupt(): Promise<void>

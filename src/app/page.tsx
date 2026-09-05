@@ -91,9 +91,11 @@ export default function Gallery() {
         DEFAULT_CHANNEL,
         AGENT_IDS.map((id) => ({
           agentId: id,
-          // Everyone hears everyone. This is the condition that makes the
-          // coordinator necessary rather than decorative.
-          remoteRtcUids: '*' as const,
+          // Deaf by default: every agent subscribes to a uid nobody joins as,
+          // so none of them self-triggers and the coordinator is the only thing
+          // that can start a turn. Naive mode swaps this for the candidate's
+          // uid and lets all three fire at once.
+          remoteRtcUids: DEFAULT_CHANNEL.remoteRtcUids,
           systemPrompt: AGENTS[id].role,
         })),
       )
@@ -345,8 +347,8 @@ export default function Gallery() {
       <header className="strip">
         <span className="wordmark">Quorum</span>
         <span className="strip-meta">
-          {DEFAULT_CHANNEL.channelName} · remote_rtc_uids &quot;*&quot; · {agoraLive ? 'agora' : 'simulated'} ·{' '}
-          {llmLive ? 'live questions' : 'scripted'}
+          {DEFAULT_CHANNEL.channelName} · remote_rtc_uids [{DEFAULT_CHANNEL.remoteRtcUids.join(', ')}] ·{' '}
+          {agoraLive ? 'agora' : 'simulated'} · {llmLive ? 'live questions' : 'scripted'}
         </span>
         <span className="strip-spacer" />
         <span className="disclosure">

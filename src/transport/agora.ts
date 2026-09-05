@@ -26,6 +26,8 @@ import type { AgentJoinSpec, Transport, TransportStatus } from '@/transport/type
 export class AgoraTransport implements Transport {
   readonly name = 'Agora Conversational AI'
   readonly implementation = 'agora' as const
+  /** Each agent carries an Agora-managed model. Granting the floor is a `think`. */
+  readonly generatesOwnLines = true
 
   private joined: AgentId[] = []
   private channelName = ''
@@ -59,11 +61,12 @@ export class AgoraTransport implements Transport {
     const body = await this.post({
       action: 'join',
       channelName: config.channelName,
+      // The route derives each agent's subscription from the mode, because the
+      // uid to subscribe to is an Agora detail and belongs on the server.
+      mode: config.mode,
       agents: agents.map((a) => ({
         agentId: a.agentId,
-        // The field that decides whether the panel can hear itself.
-        remote_rtc_uids: a.remoteRtcUids,
-        system_prompt: a.systemPrompt,
+        systemPrompt: a.systemPrompt,
       })),
     })
 
@@ -71,6 +74,14 @@ export class AgoraTransport implements Transport {
     this.joined = this.connected ? agents.map((a) => a.agentId) : []
     if (!this.connected) this.lastError = body.error ?? 'Agora join failed.'
     return this.status()
+  }
+
+  /**
+   * Grant the floor. The agent's own Agora-managed model writes the line, so
+   * what we send is the candidate's answer, not a script.
+   */
+  async think(agent: AgentId, text: string): Promise<void> {
+    await this.post({ action: 'think', channelName: this.channelName, agentId: agent, text })
   }
 
   async speak(agent: AgentId, text: string): Promise<void> {

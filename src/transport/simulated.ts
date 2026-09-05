@@ -6,18 +6,21 @@
  * through the browser's speech synthesiser.
  *
  *   1. Each agent joins under its own agent ID.
- *   2. `remoteRtcUids` decides whose audio each agent subscribes to. With `'*'`
- *      every agent hears every other agent — and hears the candidate stop at
- *      the same instant — which is the condition that produces collisions.
+ *   2. `remoteRtcUids` decides whose audio each agent subscribes to, and Agora
+ *      allows exactly one uid. Subscribed to the candidate, all three agents
+ *      hear the same silence and collide. Subscribed to SILENT_UID they hear
+ *      nothing and wait to be asked. Those are the two demo modes.
  */
 
-import type { AgentId, ChannelConfig } from '@/core/contracts'
+import { CANDIDATE_UID, type AgentId, type ChannelConfig } from '@/core/contracts'
 import { PanelVoice } from '@/speech'
 import type { AgentJoinSpec, Transport, TransportStatus } from '@/transport/types'
 
 export class SimulatedTransport implements Transport {
   readonly name = 'Simulated RTC channel'
   readonly implementation = 'simulated' as const
+  /** No model behind the simulator: the caller composes the line first. */
+  readonly generatesOwnLines = false
 
   private voice = new PanelVoice()
   private joined: AgentJoinSpec[] = []
@@ -47,10 +50,20 @@ export class SimulatedTransport implements Transport {
    * UI does: it is what makes "everyone hears everyone" visible on screen.
    */
   subscribersOf(speaker: AgentId | 'candidate'): AgentId[] {
+    const uid = speaker === 'candidate' ? CANDIDATE_UID : speaker
     return this.joined
       .filter((a) => a.agentId !== speaker)
-      .filter((a) => a.remoteRtcUids === '*' || a.remoteRtcUids.includes(speaker))
+      .filter((a) => a.remoteRtcUids.includes(uid))
       .map((a) => a.agentId)
+  }
+
+  /**
+   * There is no managed model behind the simulator, so a granted floor is
+   * spoken from the line the caller already composed. `generatesOwnLines` is
+   * false precisely so the session knows to compose it first.
+   */
+  think(agent: AgentId, text: string): Promise<void> {
+    return this.speak(agent, text)
   }
 
   /** Which voice each interviewer was given. */
