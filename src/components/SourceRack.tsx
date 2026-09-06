@@ -8,6 +8,8 @@
  */
 
 import { AGENTS, AGENT_IDS, type AgentId, type Bid } from '@/core/contracts'
+import { Icon, VoiceBars } from '@/components/InterviewVisuals'
+import type { ReactNode } from 'react'
 
 export type SourceState = 'air' | 'bid' | 'idle'
 
@@ -23,7 +25,7 @@ export interface SourceView {
 /** Bids are unbounded in principle; this is only the width of the meter. */
 const BID_FULL_SCALE = 10
 
-export function SourceRack({ sources }: { sources: Record<AgentId, SourceView> }) {
+export function SourceRack({ sources, children }: { sources: Record<AgentId, SourceView>; children?: ReactNode }) {
   return (
     <div className="rack">
       {AGENT_IDS.map((id) => {
@@ -32,18 +34,21 @@ export function SourceRack({ sources }: { sources: Record<AgentId, SourceView> }
         const label = view.state === 'air' ? 'On air' : view.state === 'bid' ? 'Bidding' : 'Standby'
 
         return (
-          <article key={id} className="source" data-state={view.state}>
+          <article key={id} className="source" data-agent={id} data-state={view.state}>
             {view.cutIn && <span className="cut-in">Cut in</span>}
 
             <header className="source-head">
-              <div>
+              <span className="source-icon"><Icon name={id} /></span>
+              <div className="source-identity">
                 <h2 className="source-name">{profile.displayName}</h2>
-              </div>
               <span className="tally">
                 <i className="lamp" aria-hidden />
                 {label}
               </span>
+              </div>
             </header>
+
+            <VoiceBars />
 
             <p className="source-role">{profile.role}</p>
 
@@ -62,6 +67,7 @@ export function SourceRack({ sources }: { sources: Record<AgentId, SourceView> }
           </article>
         )
       })}
+      {children}
     </div>
   )
 }

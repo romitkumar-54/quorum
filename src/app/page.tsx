@@ -38,6 +38,7 @@ import { CandidateEar } from '@/speech'
 import { SourceRack, type SourceView } from '@/components/SourceRack'
 import { BriefPanel, FloorStrip, Meters, TranscriptFeed } from '@/components/Panels'
 import { Ledger, Report } from '@/components/Report'
+import { Icon, QuorumMark, VoiceOrbit } from '@/components/InterviewVisuals'
 
 const idleSources = (): Record<AgentId, SourceView> =>
   Object.fromEntries(AGENT_IDS.map((id) => [id, { state: 'idle', line: '', cutIn: false }])) as Record<
@@ -605,23 +606,46 @@ export default function Gallery() {
   return (
     <main className="shell">
       <header className="strip">
-        <span className="wordmark">Quorum</span>
-        <span className="strip-meta">
+        <span className="wordmark"><QuorumMark />Quorum</span>
+        <span className="session-name">{channelName}</span>
+        <div className="header-status">
+          <span className="session-badge" data-live={phase === 'live'}><i />{phase === 'live' ? 'Live' : phase === 'closed' ? 'Complete' : 'Ready'}</span>
+          <span className="header-symbol" title={rtcJoined ? 'Connected to the voice channel' : 'Voice channel connects when the interview starts'}><Icon name="signal" /></span>
+          <span className="header-symbol" title="You are speaking with AI interviewers"><Icon name="shield" /></span>
+        </div>
+      </header>
+
+      <div className="interview-layout">
+        <aside className="live-brief" aria-label="Live interview brief">
+          <div className="sidebar-heading"><h2>Live brief</h2><span className="small-dot" /></div>
+          <div className="brief-detail"><Icon name="behavioural" /><div><span>Panel</span><strong>Three perspectives</strong><small>Technical · Product · Behavioural</small></div></div>
+          <div className="brief-detail"><Icon name="focus" /><div><span>Focus</span><strong>Systems & trade-offs<br />Product impact<br />Communication</strong></div></div>
+          <div className="brief-detail"><Icon name="signal" /><div><span>Difficulty</span><strong>Level {brief.difficulty} <span className="detail-muted">/ 5</span></strong><div className="level-steps" aria-hidden="true">{[1, 2, 3, 4, 5].map(n => <i key={n} data-on={brief.difficulty >= n} />)}</div></div></div>
+          <div className="sidebar-section">
+            <h2>Session metrics</h2>
+            <div className="brief-detail"><Icon name="clock" /><div><span>Elapsed</span><strong className="elapsed">{Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')} <span className="detail-muted">/ 15:00</span></strong></div></div>
+            <Meters metrics={metrics} />
+          </div>
+          <div className="sidebar-section session-connection"><h2>Connection</h2><p>{agoraLive ? (rtcJoined ? 'Agora · in channel' : 'Agora · ready') : 'Simulated voices'}<br />{llmLive ? 'Live questions' : 'Scripted questions'}</p><details><summary>Session details</summary><span className="strip-meta">
           {channelName} · remote_rtc_uids [{channelFor(mode, channelName).remoteRtcUids.join(', ')}] ·{' '}
           {agoraLive ? (rtcJoined ? 'agora · in channel' : 'agora') : 'simulated'} ·{' '}
           {llmLive ? 'live questions' : 'scripted'}
-        </span>
-        <span className="strip-spacer" />
+          </span></details></div>
+        </aside>
+
+        <section className="interview-room" aria-label="Interview room">
         <span className="disclosure">
-          <i className="disclosure-dot" aria-hidden />
+          <Icon name="shield" />
           You are speaking with AI interviewers, not people.
         </span>
-      </header>
 
-      <SourceRack sources={sources} />
+      <SourceRack sources={sources}>
+        <VoiceOrbit active={phase === 'live' && !muted} muted={muted} label={phase === 'closed' ? 'Interview complete' : phase === 'idle' ? 'Your place in the conversation' : thinking ? 'The panel is thinking' : busy ? 'The panel has the floor' : muted ? 'Microphone muted' : 'Your turn to speak'} />
+      </SourceRack>
       <FloorStrip decision={decision} />
 
-      <div className="controls">
+      <div className="controls control-dock">
+        <div className="coordinator-control"><span className="control-caption">Coordinator</span>
         <div className="mode" role="group" aria-label="Coordinator">
           <button
             type="button"
@@ -641,30 +665,33 @@ export default function Gallery() {
             Coordinator off
           </button>
         </div>
+        </div>
 
         {phase !== 'live' ? (
           <button type="button" className="btn" data-primary="true" onClick={startInterview} disabled={busy || !ready}>
+            <Icon name="mic" />
             {phase === 'closed' ? 'Start another interview' : 'Start interview'}
           </button>
         ) : (
           <>
-            <button type="button" className="btn" data-danger="true" onClick={() => void endInterview()}>
-              End interview
-            </button>
             {/* Never disabled. You must be able to stop transmitting even while
                 the panel is mid-sentence. */}
-            <button type="button" className="btn" data-on={muted} onClick={toggleMute}>
+            <button type="button" className="btn" data-primary="true" data-on={muted} onClick={toggleMute}>
+              <Icon name={muted ? 'muted' : 'mic'} />
               {muted ? 'Unmute microphone' : 'Mute microphone'}
+            </button>
+            <button type="button" className="btn" data-danger="true" onClick={() => void endInterview()}>
+              <Icon name="signal" />End interview
             </button>
           </>
         )}
 
         <button type="button" className="btn" onClick={() => reset()} disabled={busy || phase === 'live'}>
-          Reset
+          <Icon name="reset" />Reset
         </button>
       </div>
 
-      <div className="controls" aria-live="polite">
+      <div className="controls session-guidance" aria-live="polite">
         {phase === 'closed' && endReason ? END_MESSAGES[endReason] : phase === 'live'
           ? `Answer ${Math.min(brief.turn + 1, INTERVIEW_LIMITS.maxAnswers)} of up to 12 · ${Math.floor(elapsedSeconds / 60)}:${String(elapsedSeconds % 60).padStart(2, '0')} / 15:00`
           : 'About 9 answers across three areas. Ends automatically by 12 answers or 15 minutes, or after 2 minutes without activity.'}
@@ -673,7 +700,7 @@ export default function Gallery() {
       </div>
 
       {phase === 'live' && (
-        <div className="controls">
+        <div className="controls listening-controls">
           <span className="hearing" data-muted={busy || muted} aria-live="polite">
             {thinking
               ? 'The panel is thinking…'
@@ -691,7 +718,8 @@ export default function Gallery() {
       )}
 
       {phase === 'live' && (
-        <div className="controls">
+        <div className="controls text-controls">
+          <span className="typing-label"><Icon name="arrow" />Prefer typing? <span>Use text fallback</span></span>
           <form
             className="field"
             data-fallback="true"
@@ -705,7 +733,7 @@ export default function Gallery() {
           <input
             value={answer}
             onChange={(event) => { setAnswer(event.target.value); lastActivityRef.current = Date.now() }}
-            placeholder="…or type instead, if the microphone will not cooperate"
+            placeholder="Type your answer here…"
             disabled={busy}
             aria-label="Your answer"
           />
@@ -717,13 +745,16 @@ export default function Gallery() {
       )}
 
       {notice && (
-        <div className="controls" style={{ color: 'var(--bid)' }}>
+        <div className="controls notice" role="status">
           {notice}
         </div>
       )}
 
-      <Meters metrics={metrics} />
+        </section>
+      </div>
 
+      <section className="session-record" aria-label="Session record">
+      <div className="record-heading"><div><span className="eyebrow">The conversation, captured</span><h2>Session record</h2></div><span className="record-note">Every perspective. Every piece of evidence.</span></div>
       <div className="columns">
         <TranscriptFeed events={transcript} yieldedIds={yieldedIds} />
         <BriefPanel brief={brief} />
@@ -731,6 +762,7 @@ export default function Gallery() {
 
       {assessment && <Report assessment={assessment} />}
       <Ledger state={requirementState} />
+      </section>
     </main>
   )
 }
