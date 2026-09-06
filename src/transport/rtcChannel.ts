@@ -21,6 +21,7 @@ import type {
   IAgoraRTCRemoteUser,
   IMicrophoneAudioTrack,
 } from 'agora-rtc-sdk-ng'
+import { installAgoraSdpCompatibility } from '@/transport/rtcSdp'
 
 /** The candidate's RTC identity. Agents are 1001 upward. */
 export const CANDIDATE_RTC_UID = 1000
@@ -58,6 +59,7 @@ export class RtcChannel {
   private handlers: RtcChannelHandlers = {}
   private joinedChannel = ''
   private speaking = new Set<number>()
+  private restoreCreateOffer: (() => void) | null = null
 
   /**
    * Joins and leaves run one at a time, in order.
@@ -145,6 +147,9 @@ export class RtcChannel {
     }
 
     try {
+      // Chromium can include private, non-standard ICE option tags that Agora
+      // 4.24.8's strict SDP parser rejects before the channel can connect.
+      this.restoreCreateOffer = installAgoraSdpCompatibility()
       const AgoraRTC = (await import('agora-rtc-sdk-ng')).default
       // Voice only. A video codec still has to be named; nothing publishes video.
       const client = AgoraRTC.createClient({ mode: 'rtc', codec: 'vp8' })
@@ -236,6 +241,8 @@ export class RtcChannel {
       this.client = null
       this.joinedChannel = ''
       this.speaking.clear()
+      this.restoreCreateOffer?.()
+      this.restoreCreateOffer = null
     }
   }
 
